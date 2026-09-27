@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 import gspread
+from gspread.exceptions import GSpreadException
 
 from app.core.config import settings
 from app.services.errors import ServiceUnavailableError
@@ -49,7 +50,7 @@ def _open_sheet(sheet_name: str):
         raise ServiceUnavailableError("Attendance spreadsheet not found.")
     except gspread.WorksheetNotFound:
         raise ServiceUnavailableError(f"Sheet '{sheet_name}' not found in spreadsheet.")
-    except gspread.GspreadError:
+    except GSpreadException:
         logger.exception("Google Sheets error")
         raise ServiceUnavailableError("Google Sheets request failed.")
 
