@@ -69,15 +69,16 @@ export function AuthProvider({ children }) {
     return () => api.setAuthRecovery(null, null);
   }, [authorize]);
 
-  // Redirect sign-in returns to the app ROOT — if the student parked an
-  // attendance link (QR token) before leaving, go straight back to it
-  // instead of stranding them on / and starting a continue→login loop.
+  // Restore a parked /attendance?token=… link AFTER the redirect sign-in has
+  // actually committed (firebaseUser becomes truthy). Navigating on mount —
+  // before getRedirectResult() finishes — unloads the page mid-flight and
+  // aborts the credential save, bouncing users back signed-out in a loop.
   useEffect(() => {
+    if (!firebaseUser) return;                  // undefined (loading) or null: wait
+    if (window.location.pathname !== "/") return; // only recover the root landing
     const returnUrl = takeAttendanceReturnUrl();
-    if (returnUrl && window.location.pathname === "/") {
-      window.location.assign(returnUrl);
-    }
-  }, []);
+    if (returnUrl) window.location.assign(returnUrl);
+  }, [firebaseUser]);
 
   // Bootstrap: restore an existing Firebase session and re-authorize. Also
   // consume any pending redirect-sign-in result (Google login returns via
