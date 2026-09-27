@@ -69,16 +69,17 @@ export function AuthProvider({ children }) {
     return () => api.setAuthRecovery(null, null);
   }, [authorize]);
 
-  // Restore a parked /attendance?token=… link AFTER the redirect sign-in has
-  // actually committed (firebaseUser becomes truthy). Navigating on mount —
-  // before getRedirectResult() finishes — unloads the page mid-flight and
-  // aborts the credential save, bouncing users back signed-out in a loop.
+  // Restore a parked /attendance?token=… link only once the redirect
+  // sign-in has FULLY completed. Gating on `role` (set solely by a successful
+  // /authorize-user) means the HttpOnly cookie is committed BEFORE we
+  // navigate — navigating on `firebaseUser` alone reloads the page mid-flight
+  // and aborts that first /authorize-user, leaving no cookie (UNAUTHORIZED).
   useEffect(() => {
-    if (!firebaseUser) return;                  // undefined (loading) or null: wait
-    if (window.location.pathname !== "/") return; // only recover the root landing
+    if (!role) return;                            // not authorized yet: wait
+    if (window.location.pathname !== "/") return;  // only recover the root landing
     const returnUrl = takeAttendanceReturnUrl();
     if (returnUrl) window.location.assign(returnUrl);
-  }, [firebaseUser]);
+  }, [role]);
 
   // Bootstrap: restore an existing Firebase session and re-authorize. Also
   // consume any pending redirect-sign-in result (Google login returns via
@@ -122,6 +123,21 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
+  // Guarantee a fresh backend application-JWT cookie for the CURRENT Firebase
+  // user before any protected call. The redirect flow authorizes
+  // asynchronously at boot, so the student flow awaits this instead of racing
+  // an ambient /authorize-user (which caused verify-token 401 "not signed in").
+  const ensureSession = useCallback(async () => {
+    try {
+      const token = await getFirebaseIdToken(true);
+      if (!token) return null;
+      const user = await authorize(token);
+      return user ? user.role : null;
+    } catch {
+      return null;
+    }
+  }, [authorize]);
+
   const logout = useCallback(async () => {
     try {
       await api.logout();
@@ -144,6 +160,7 @@ export function AuthProvider({ children }) {
         requiresReauth, // JWT rejected and could not be re-issued
         login,
         logout,
+        ensureSession,
       }}
     >
       {children}

@@ -28,7 +28,7 @@ const FATAL_CODES = ["QR_INVALID", "QR_EXPIRED", "SESSION_NOT_ACTIVE", "SESSION_
 export default function StudentAttendance() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
-  const { firebaseUser, role, error: authError, requiresReauth, login } = useAuth();
+  const { firebaseUser, role, error: authError, requiresReauth, login, ensureSession } = useAuth();
   // found -> last3 -> lookup -> confirm -> verifying -> success | failed
   // returning students skip straight to "welcome" after verify-token
   const [stage, setStage] = useState(token ? "found" : "invalid");
@@ -82,11 +82,25 @@ export default function StudentAttendance() {
     setBusy(true);
     setSubmitError(null);
     try {
+      // Not signed in yet: start the Google redirect and STOP — this page
+      // reloads after sign-in (the QR link is restored) and the student
+      // taps Continue again from a signed-in, authorized state.
+      if (!firebaseUser) {
+        await login();
+        return;
+      }
+      // Ensure the backend cookie exists BEFORE the protected call. The
+      // redirect flow authorizes asynchronously at boot, so we no longer
+      // assume it has already run (that race caused verify-token 401s).
+      const authed = await ensureSession();
+      if (!authed) {
+        setSubmitError("Could not verify your sign-in. Please try again.");
+        return;
+      }
       // Location must be allowed before the 1-minute verification continues.
       await getCurrentLocation().catch((err) => {
         setLocationWarning(err.message);
       });
-      if (!firebaseUser) await login();
       // Validate the QR token server-side; this starts the enforced window.
       const data = await api.verifyToken(token);
       const seconds = data.window_seconds || 60;
@@ -107,7 +121,7 @@ export default function StudentAttendance() {
       busyRef.current = false;
       setBusy(false);
     }
-  }, [firebaseUser, login, token]);
+  }, [firebaseUser, login, ensureSession, token]);
 
   // ---- Step 2: last-3 lookup (backend resolves against Sheet1) -------------
   const handleLookup = async (event) => {
