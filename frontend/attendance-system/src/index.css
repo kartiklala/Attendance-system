@@ -1,0 +1,6 @@
+/* Global reset handled in App.css; keep a minimal base here. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
