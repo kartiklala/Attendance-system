@@ -428,12 +428,30 @@ function mapError(err) {
 function StudentCard({ title, body, hint, children }) {
   return (
     <div className="page-center">
-      <div className="card student-card">
-        {title && <h1 className="app-title">{title}</h1>}
-        {body && <p>{body}</p>}
-        {hint && <p className="muted hint">{hint}</p>}
-        {children}
+      <div className="student-shell">
+        <SignOutChip />
+        <div className="card student-card">
+          {title && <h1 className="app-title">{title}</h1>}
+          {body && <p>{body}</p>}
+          {hint && <p className="muted hint">{hint}</p>}
+          {children}
+        </div>
       </div>
+    </div>
+  );
+}
+
+// Mobile students have no other way to leave a signed-in Google account
+// (e.g. wrong account) — always show who is signed in + a sign-out button.
+function SignOutChip() {
+  const { firebaseUser, logout } = useAuth();
+  if (!firebaseUser) return null;
+  return (
+    <div className="auth-chip">
+      <span className="auth-chip-user">Signed in as {firebaseUser.email}</span>
+      <button className="btn btn-ghost btn-small" onClick={() => logout().catch(() => {})}>
+        Sign out
+      </button>
     </div>
   );
 }

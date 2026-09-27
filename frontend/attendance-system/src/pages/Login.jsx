@@ -7,7 +7,7 @@ import { ErrorBox, GoogleIcon } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 export default function Login() {
-  const { firebaseUser, profile, role, error, login } = useAuth();
+  const { firebaseUser, profile, role, error, login, logout } = useAuth();
   const navigate = useNavigate();
   const [locationState, setLocationState] = useState("prompting"); // prompting | granted | denied
   const [locationMessage, setLocationMessage] = useState("");
@@ -91,6 +91,9 @@ export default function Login() {
               To mark attendance, scan the QR code shown by your Class
               Representative.
             </p>
+            <button className="btn btn-ghost btn-small" onClick={logout}>
+              Sign out / use another account
+            </button>
           </div>
         ) : (
           <p className="muted">Authorizing…</p>
