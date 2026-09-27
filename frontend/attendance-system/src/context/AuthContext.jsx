@@ -17,6 +17,10 @@ export function AuthProvider({ children }) {
   const [role, setRole] = useState(null); // null | "cr" | "student"
   const [profile, setProfile] = useState(null); // { uid, name, email, role }
   const [error, setError] = useState(null);
+  // Set when the backend permanently rejects the application JWT and it
+  // could not be re-issued: all session/attendance UI state must be dropped
+  // and fresh authorization required (spec: no stale "Continue").
+  const [requiresReauth, setRequiresReauth] = useState(false);
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -32,23 +36,35 @@ export function AuthProvider({ children }) {
     setProfile(data.user);
     setRole(data.user.role);
     setError(null);
+    setRequiresReauth(false);
     return data.user;
   }, []);
 
   // Re-authorize with the current Firebase session (used by the api layer
-  // when the 3-minute application JWT expires mid-session).
+  // when the 3-minute application JWT expires mid-session). If recovery is
+  // impossible, the api layer calls the permanent handler: clear the
+  // authenticated profile so every protected screen falls back to sign-in.
   useEffect(() => {
-    api.setAuthRecovery(async () => {
-      try {
-        const token = await getFirebaseIdToken(true);
-        if (!token) return false;
-        await authorize(token);
-        return true;
-      } catch {
-        return false;
+    api.setAuthRecovery(
+      async () => {
+        try {
+          const token = await getFirebaseIdToken(true);
+          if (!token) return false;
+          await authorize(token);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+      () => {
+        if (!mounted.current) return;
+        setProfile(null);
+        setRole(null);
+        setRequiresReauth(true);
+        setError("Your session expired. Please sign in again.");
       }
-    });
-    return () => api.setAuthRecovery(null);
+    );
+    return () => api.setAuthRecovery(null, null);
   }, [authorize]);
 
   // Bootstrap: restore an existing Firebase session and re-authorize.
@@ -58,6 +74,7 @@ export function AuthProvider({ children }) {
       if (!user) {
         setRole(null);
         setProfile(null);
+        setRequiresReauth(false);
         return;
       }
       try {
@@ -94,6 +111,7 @@ export function AuthProvider({ children }) {
     await signOutUser();
     setRole(null);
     setProfile(null);
+    setRequiresReauth(false);
   }, []);
 
   return (
@@ -103,6 +121,7 @@ export function AuthProvider({ children }) {
         profile,        // { uid, name, email, role } from the backend
         role,           // "cr" | "student" | null
         error,
+        requiresReauth, // JWT rejected and could not be re-issued
         login,
         logout,
       }}

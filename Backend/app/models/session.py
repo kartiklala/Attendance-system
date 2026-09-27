@@ -1,6 +1,8 @@
 """Pydantic models for attendance sessions and QR tokens."""
 from pydantic import BaseModel, Field
 
+from app.models.attendance import AttendanceSummary
+
 
 class StartAttendanceRequest(BaseModel):
     latitude: float = Field(ge=-90, le=90)
@@ -21,6 +23,7 @@ class StartAttendanceResponse(BaseModel):
     success: bool = True
     session_id: str
     radius_meters: float
+    is_new: bool = True  # False when the CR joined the existing active session
     qr: QRPayload
 
 
@@ -31,6 +34,7 @@ class EndAttendanceRequest(BaseModel):
 class EndAttendanceResponse(BaseModel):
     success: bool = True
     message: str = "Attendance session ended successfully."
+    summary: AttendanceSummary | None = None
 
 
 class QRRefreshRequest(BaseModel):
@@ -56,3 +60,16 @@ class SessionInfo(BaseModel):
 class SessionResponse(BaseModel):
     success: bool = True
     session: SessionInfo
+
+
+class ActiveSessionResponse(BaseModel):
+    """GET /active-session — the single shared active session (or None)."""
+    success: bool = True
+    session: SessionInfo | None = None
+    qr: QRPayload | None = None
+    stats: dict | None = None
+
+
+class SummaryResponse(BaseModel):
+    success: bool = True
+    summary: AttendanceSummary

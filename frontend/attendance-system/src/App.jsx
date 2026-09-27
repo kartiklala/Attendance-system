@@ -12,8 +12,10 @@ import { Loading } from "./components/ui";
 import "./App.css";
 
 function CRRoute() {
-  const { firebaseUser, role } = useAuth();
+  const { firebaseUser, role, requiresReauth } = useAuth();
   if (firebaseUser === undefined || (firebaseUser && role === null)) {
+    // JWT rejected and not re-issuable: no stale dashboard — back to sign-in.
+    if (requiresReauth) return <Navigate to="/" replace />;
     return <Loading label="Checking your access…" />;
   }
   if (!firebaseUser) return <Navigate to="/" replace />;

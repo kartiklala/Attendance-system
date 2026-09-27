@@ -73,5 +73,6 @@ def get_db() -> firestore.Client:
 COLLECTION_ADMIN_LIST = "admin_list"
 COLLECTION_USERS = "users"
 COLLECTION_SESSIONS = "sessions"
+COLLECTION_SESSION_STATE = "session_state"
 COLLECTION_QR_TOKENS = "qr_tokens"
 COLLECTION_ATTENDANCE = "attendance"

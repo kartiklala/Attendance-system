@@ -7,8 +7,13 @@ const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").repla
 // Firebase ID token. Used to transparently recover when the 3-minute
 // application JWT expires mid-session.
 let recoverAuth = null;
-export function setAuthRecovery(fn) {
+// Set by AuthContext: called when re-authorization is impossible or was
+// rejected — the frontend must drop all authenticated/session UI state and
+// go back to the Google sign-in screen (never reuse an expired JWT).
+let onAuthPermanent = null;
+export function setAuthRecovery(fn, permanentFn) {
   recoverAuth = fn;
+  onAuthPermanent = permanentFn;
 }
 
 async function request(path, { method = "GET", body, firebaseIdToken } = {}, isRetry = false) {
@@ -38,9 +43,12 @@ async function request(path, { method = "GET", body, firebaseIdToken } = {}, isR
   }
 
   // Application JWT expired -> silently re-authorize once, then retry.
-  if (response.status === 401 && !isRetry && recoverAuth && path !== "/authorize-user") {
-    const recovered = await recoverAuth();
+  // If recovery is impossible or fails, treat the user as unauthenticated
+  // so stale screens (Continue buttons etc.) can never keep working.
+  if (response.status === 401 && !isRetry && path !== "/authorize-user") {
+    const recovered = recoverAuth ? await recoverAuth() : false;
     if (recovered) return request(path, { method, body, firebaseIdToken }, true);
+    if (onAuthPermanent) onAuthPermanent();
   }
 
   if (!response.ok) {
@@ -60,6 +68,8 @@ export const logout = () => request("/logout", { method: "POST" });
 export const getMe = () => request("/me");
 
 // ---- CR session ---------------------------------------------------------
+export const getActiveSession = () => request("/active-session");
+
 export const startAttendance = (latitude, longitude) =>
   request("/start-attendance", { method: "POST", body: { latitude, longitude } });
 
@@ -69,17 +79,34 @@ export const refreshQR = (sessionId) =>
 export const endAttendance = (sessionId) =>
   request("/end-attendance", { method: "POST", body: { session_id: sessionId } });
 
+export const getSessionStats = (sessionId) =>
+  request(`/sessions/${sessionId}/stats`);
+
+export const getSessionSummary = (sessionId) =>
+  request(`/sessions/${sessionId}/summary`);
+
 // ---- Student ------------------------------------------------------------
 export const verifyToken = (sessionToken) =>
   request("/attendance/verify-token", { method: "POST", body: { session_token: sessionToken } });
 
-export const checkAttendance = ({ sessionToken, name, enrollmentNo, latitude, longitude }) =>
+// Whether this Google account already has a backend-verified enrollment.
+export const getStudentMe = () => request("/student/me");
+
+// Resolve the last 3 enrollment digits against Sheet1 (server-side lookup).
+export const studentLookup = (last3) =>
+  request("/student/lookup", { method: "POST", body: { last3 } });
+
+// Confirm the match: backend verifies again and links enrollment to the UID.
+export const studentConfirm = (last3) =>
+  request("/student/confirm", { method: "POST", body: { last3 } });
+
+// Identity comes from the verified enrollment saved against the UID — the
+// request body carries no name/enrollment fields at all.
+export const checkAttendance = ({ sessionToken, latitude, longitude }) =>
   request("/attendance/check", {
     method: "POST",
     body: {
       session_token: sessionToken,
-      name,
-      enrollment_no: enrollmentNo,
       latitude,
       longitude,
     },

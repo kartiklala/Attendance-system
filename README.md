@@ -95,7 +95,7 @@ as Editor):
 
 | Worksheet   | Purpose | Columns |
 | ----------- | ------- | ------- |
-| `Students`  | authoritative roster | `Enrollment No` \| `Name` (header row + one row per student) |
+| `Sheet1`    | authoritative roster | `Enrollment-ID` \| `Name` (header row + one row per student) |
 | `Attendance`| attendance log | `Timestamp` \| `Enrollment No` \| `Student Name` \| `Status` \| `Session-ID` |
 
 The backend writes `Status = PRESENT` only after **all** checks pass
@@ -129,10 +129,10 @@ Check: `GET http://localhost:8000/health` →
 | `QR_TOKEN_LIFETIME_SECONDS` | QR rotation interval | 10 |
 | `FRONTEND_URL` | comma-separated CORS origins | http://localhost:5173 |
 | `PUBLIC_APP_URL` | base URL encoded inside QR images | same as FRONTEND_URL |
-| `FIREBASE_CREDENTIALS_FILE` | path to service-account JSON | ./credentials/serviceAccountKey.json |
-| `GOOGLE_SERVICE_ACCOUNT_FILE` | Sheets credentials (can be the same file) | ./credentials/serviceAccountKey.json |
+| `FIREBASE_CREDENTIALS_FILE` | path to service-account JSON | ./firebasecreds.json |
+| `GOOGLE_SERVICE_ACCOUNT_FILE` | Sheets credentials (can be the same file) | ./firebasecreds.json |
 | `GOOGLE_SHEET_ID` | spreadsheet ID (from its URL) | — |
-| `GOOGLE_SHEET_NAME` / `GOOGLE_STUDENTS_SHEET_NAME` | worksheet names | Attendance / Students |
+| `GOOGLE_SHEET_NAME` / `GOOGLE_STUDENTS_SHEET_NAME` | worksheet names | Attendance / Sheet1 |
 
 The server **starts without credentials** (dev-friendly); Firestore/Sheets
 dependent APIs return 503 until configured.
@@ -166,12 +166,18 @@ VITE_API_URL=http://localhost:8000
 | `POST /authorize-user` | `Authorization: Bearer <firebase id token>` | verifies ID token, resolves role from `admin_list`, upserts `users`, issues 3-min JWT in HttpOnly cookie |
 | `GET /me` | cookie JWT | current user info |
 | `POST /logout` | — | clears cookie |
-| `POST /start-attendance` | CR | creates session at CR lat/lng, returns first QR |
-| `POST /qr/refresh` | CR | rotates QR (invalidates previous token) |
-| `POST /end-attendance` | CR | ends session, invalidates all its tokens |
+| `POST /start-attendance` | CR | creates the one shared active session (or joins it) — race-safe |
+| `GET /active-session` | CR | rejoin: the single active session + current QR + live stats |
+| `POST /qr/refresh` | CR | returns the session's current QR (rotates only when expired) |
+| `POST /end-attendance` | CR | ends the shared session for ALL CRs, returns server-computed summary |
+| `GET /sessions/{id}/stats` | CR | live present/total counts + recent arrivals (jar animation) |
+| `GET /sessions/{id}/summary` | CR | final summary: absentees, counts, percentage |
 | `GET /sessions/{id}` | JWT | session details (location redacted for non-owners) |
 | `POST /attendance/verify-token` | JWT | student scanned QR → starts server-side 1-min window |
-| `POST /attendance/check` | student JWT | full validation + Firestore + Google Sheet write |
+| `GET /student/me` | student JWT | is a backend-verified enrollment already saved for this Google account? |
+| `POST /student/lookup` | student JWT | resolves last-3 enrollment digits against Sheet1 (server-side) |
+| `POST /student/confirm` | student JWT | re-verifies and links the enrollment to the Firebase UID |
+| `POST /attendance/check` | student JWT | full validation + Firestore + Google Sheet write (identity from the saved UID link) |
 
 Errors use a consistent shape:
 
@@ -180,8 +186,10 @@ Errors use a consistent shape:
 ```
 
 Codes include: `UNAUTHORIZED`, `CR_ONLY`, `STUDENT_ONLY`, `QR_INVALID`,
-`QR_EXPIRED`, `SESSION_NOT_ACTIVE`, `ATTENDANCE_WINDOW_EXPIRED`,
-`STUDENT_NOT_FOUND`, `OUTSIDE_LOCATION`, `ALREADY_MARKED`, `SERVICE_UNAVAILABLE`.
+`QR_EXPIRED`, `SESSION_NOT_ACTIVE`, `SESSION_NOT_FOUND`,
+`ATTENDANCE_WINDOW_EXPIRED`, `STUDENT_NOT_FOUND`, `MULTIPLE_STUDENTS_MATCH`,
+`ENROLLMENT_NOT_VERIFIED`, `OUTSIDE_LOCATION`, `ALREADY_MARKED`,
+`SERVICE_UNAVAILABLE`.
 
 ---
 
@@ -195,6 +203,14 @@ Codes include: `UNAUTHORIZED`, `CR_ONLY`, `STUDENT_ONLY`, `QR_INVALID`,
   1-minute completion window; ended sessions reject all their tokens.
 - **Roles** — backend-only, from `admin_list`. Frontend role data is display
   information, never authorization.
+- **One active session** — a `session_state/current` pointer document plus a
+  Firestore transaction make it impossible for two CRs to create two active
+  sessions; all CRs see the same session, QR and statistics.
+- **Student identity** — students never type their name or full enrollment.
+  The last-3-digit input is resolved server-side against `Sheet1` (ambiguous
+  matches are rejected); the verified `enrollment_no` is stored on
+  `users/{uid}` and reused on later scans. `/attendance/check` accepts no
+  identity fields at all.
 - **Location** — Haversine distance computed by the backend between stored CR
   position and submitted student position, compared to `ATTENDANCE_RADIUS_METERS`.
 - **Duplicates** — deterministic document id `{session_id}__{ENROLLMENT}` in the
@@ -206,16 +222,19 @@ Codes include: `UNAUTHORIZED`, `CR_ONLY`, `STUDENT_ONLY`, `QR_INVALID`,
 
 ## 9. Local end-to-end test
 
-1. Put the service-account JSON in `Backend/credentials/`, fill `.env`, restart uvicorn.
+1. Put the service-account JSON at `Backend/firebasecreds.json`, fill `.env`, restart uvicorn.
 2. Add your own Google email to `admin_list` in Firestore.
-3. Create the Google Sheet (Students + Attendance tabs), share with the
+3. Create the Google Sheet (`Sheet1` roster + `Attendance` log), share with the
    service-account email, set `GOOGLE_SHEET_ID`.
 4. Start frontend + backend, open `http://localhost:5173` as the **CR** →
    allow location → sign in → *Start Session Attendance* → QR appears, refreshes every 10 s.
-5. On a phone, open the QR link → sign in with a student Google account whose
-   enrollment/name exist in the **Students** sheet → submit within 1 minute →
-   a `PRESENT` row lands in the **Attendance** sheet.
-6. As CR press *End Session* — further submissions are rejected.
+   A second CR signing in is dropped straight into the same live session.
+5. On a phone, open the QR link → sign in with a student Google account →
+   enter the **last 3 digits** of the enrollment → confirm the shown name →
+   submit within 1 minute → a `PRESENT` row lands in the **Attendance** sheet.
+   On the next scan the student is recognized automatically.
+6. As CR press *End Session* — further submissions are rejected and the final
+   absentee list + present percentage (computed by the backend) is shown.
 
 ---
 

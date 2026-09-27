@@ -1,8 +1,13 @@
 // Student flow: /attendance?token=<qr_token>
-// 1. Token found -> show info + Continue
+// 1. Token found -> show info + Continue (disabled after first click)
 // 2. Location + Google sign-in (POST /authorize-user)
 // 3. POST /attendance/verify-token -> starts the SERVER-side 1-minute window
-// 4. Name + Enrollment form -> POST /attendance/check (location re-read at submit)
+// 4. Returning student: GET /student/me shows the saved verified enrollment.
+//    New student: POST /student/lookup (last 3 digits only, matched on the
+//    backend against Sheet1) -> "Student Found" -> POST /student/confirm
+//    links the verified enrollment to the Firebase UID.
+// 5. POST /attendance/check (location re-read at submit; the request body
+//    carries no name/enrollment — identity comes from the saved UID link).
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import * as api from "../services/api";
@@ -17,23 +22,37 @@ const formatMMSS = (seconds) =>
 
 const CHECKLIST = ["Identity", "Session", "Location", "Student record"];
 
+// Fatal codes mean the QR/session is dead — no point offering a retry.
+const FATAL_CODES = ["QR_INVALID", "QR_EXPIRED", "SESSION_NOT_ACTIVE", "SESSION_NOT_FOUND"];
+
 export default function StudentAttendance() {
   const [searchParams] = useSearchParams();
   const token = searchParams.get("token") || "";
-  const { firebaseUser, profile, role, error: authError, login } = useAuth();
-
-  // found -> form -> verifying -> success | failed
+  const { firebaseUser, role, error: authError, requiresReauth, login } = useAuth();
+  // found -> last3 -> lookup -> confirm -> verifying -> success | failed
+  // returning students skip straight to "welcome" after verify-token
   const [stage, setStage] = useState(token ? "found" : "invalid");
   const [windowSeconds, setWindowSeconds] = useState(0); // server-enforced window
   const [timeLeft, setTimeLeft] = useState(0);
-  const [name, setName] = useState("");
-  const [enrollment, setEnrollment] = useState("");
+  const [last3, setLast3] = useState("");
+  const [found, setFound] = useState(null); // { name, masked_enrollment }
   const [submitError, setSubmitError] = useState(null);
   const [checkingStep, setCheckingStep] = useState(-1);
   const [locationWarning, setLocationWarning] = useState("");
-  const expiredRef = useRef(false);
+  const [busy, setBusy] = useState(false); // disables Continue/Submit on click
+  const busyRef = useRef(false);
 
-  expiredRef.current = stage !== "form" ? expiredRef.current : timeLeft <= 0 && windowSeconds > 0;
+  // The backend rejected the application JWT and it could not be re-issued:
+  // drop all local attendance state so no stale Continue/Submit can ever
+  // fire against an old session (runs only on the transition, not per render).
+  useEffect(() => {
+    if (requiresReauth) {
+      setStage("found");
+      busyRef.current = false;
+      setBusy(false);
+      setSubmitError("Your session expired. Please sign in again and rescan the QR.");
+    }
+  }, [requiresReauth]);
 
   // One-minute countdown (display only — the backend enforces the real limit).
   useEffect(() => {
@@ -42,12 +61,25 @@ export default function StudentAttendance() {
     return () => clearInterval(timer);
   }, [windowSeconds]);
 
-  // Pre-fill the name from the Google profile for convenience.
+  // If the QR/session died while the student was mid-flow, surface it and
+  // remove any actionable buttons (no stale Continue on an expired session).
+  // The error object is stored unrendered, so this reads it without setting.
   useEffect(() => {
-    if (profile?.name) setName((current) => current || profile.name);
-  }, [profile]);
+    if (
+      submitError &&
+      typeof submitError !== "string" &&
+      FATAL_CODES.includes(submitError.code)
+    ) {
+      setStage("failed");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submitError?.code ?? null]);
 
+  // ---- Step 1: Continue (sign in + verify QR token) ------------------------
   const handleContinue = useCallback(async () => {
+    if (busyRef.current) return; // first click wins — no duplicate requests
+    busyRef.current = true;
+    setBusy(true);
     setSubmitError(null);
     try {
       // Location must be allowed before the 1-minute verification continues.
@@ -60,17 +92,48 @@ export default function StudentAttendance() {
       const seconds = data.window_seconds || 60;
       setWindowSeconds(seconds);
       setTimeLeft(seconds);
-      setStage("form");
-    } catch (err) {
-      setSubmitError(mapError(err));
-      if (["QR_INVALID", "QR_EXPIRED", "SESSION_NOT_ACTIVE"].includes(err.code)) {
-        setStage("failed");
+      // Returning account? Reuse the backend-verified enrollment.
+      const me = await api.getStudentMe();
+      if (me.verified) {
+        setFound({ name: me.name, masked_enrollment: me.masked_enrollment });
+        setStage("welcome");
+      } else {
+        setStage("last3");
       }
+    } catch (err) {
+      setSubmitError(err);
+      if (FATAL_CODES.includes(err.code)) setStage("failed");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
   }, [firebaseUser, login, token]);
 
-  const handleSubmit = async (event) => {
+  // ---- Step 2: last-3 lookup (backend resolves against Sheet1) -------------
+  const handleLookup = async (event) => {
     event.preventDefault();
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setSubmitError(null);
+    try {
+      const data = await api.studentLookup(last3);
+      setFound({ name: data.name, masked_enrollment: data.masked_enrollment });
+      setStage("confirm");
+    } catch (err) {
+      setSubmitError(err);
+      if (FATAL_CODES.includes(err.code)) setStage("failed");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  };
+
+  // ---- Step 3: confirm -> save UID↔enrollment -> mark attendance -----------
+  const handleSubmit = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
     setSubmitError(null);
     setStage("verifying");
     setCheckingStep(0);
@@ -82,13 +145,14 @@ export default function StudentAttendance() {
     );
 
     try {
+      // Link the verified enrollment to this Google account (idempotent; the
+      // backend re-verifies against Sheet1 before saving anything).
+      if (stage === "confirm") await api.studentConfirm(last3);
       // Fresh, high-accuracy location at submission time.
       const location = await getCurrentLocation();
       setLocationWarning("");
-      const result = await api.checkAttendance({
+      await api.checkAttendance({
         sessionToken: token,
-        name: name.trim(),
-        enrollmentNo: enrollment.trim(),
         latitude: location.latitude,
         longitude: location.longitude,
       });
@@ -96,16 +160,25 @@ export default function StudentAttendance() {
       setCheckingStep(CHECKLIST.length);
       setStage("success");
       setSubmitError(null);
-      return result;
     } catch (err) {
       clearInterval(stepTimer);
-      setSubmitError(mapError(err));
-      setStage("failed");
-      return null;
+      setSubmitError(err);
+      setStage(FATAL_CODES.includes(err.code) ? "failed" : "retry");
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
     }
   };
 
-  // ---- Render ------------------------------------------------------------
+  // ---- Render --------------------------------------------------------------
+  const windowStarted = windowSeconds > 0;
+  const windowExpired = windowStarted && timeLeft <= 0;
+  const errorText = submitError
+    ? typeof submitError === "string"
+      ? submitError
+      : mapError(submitError)
+    : null;
+
   if (stage === "invalid") {
     return (
       <StudentCard
@@ -117,16 +190,157 @@ export default function StudentAttendance() {
   }
 
   if (stage === "found") {
+    // Session expired with no Firebase session left to re-authorize from:
+    // offer a fresh sign-in only — never a Continue against the old session.
+    const signedOut = requiresReauth && !firebaseUser;
     return (
       <StudentCard>
         <h1 className="app-title">Student Attendance</h1>
-        <p className="session-found">✓ Attendance Session Found</p>
-        <p className="muted">This session is valid for 1 minute once you continue.</p>
-        <button className="btn btn-primary btn-large" onClick={handleContinue}>
-          Continue
+        {signedOut ? (
+          <p className="failed-reason">
+            Your session expired. Please sign in again and rescan the QR.
+          </p>
+        ) : (
+          <>
+            <p className="session-found">✓ Attendance Session Found</p>
+            <p className="muted">This session is valid for 1 minute once you continue.</p>
+          </>
+        )}
+        <button
+          className="btn btn-primary btn-large"
+          onClick={signedOut ? () => login().catch(() => {}) : handleContinue}
+          disabled={busy}
+        >
+          {busy
+            ? "Processing…"
+            : signedOut
+              ? "Sign in again"
+              : "Continue"}
         </button>
         {locationWarning && <p className="warning-text">{locationWarning}</p>}
-        <ErrorBox message={submitError || authError} />
+        <ErrorBox message={signedOut ? null : errorText || authError} />
+      </StudentCard>
+    );
+  }
+
+  if (stage === "welcome") {
+    // Returning student: the backend already holds a verified enrollment.
+    return (
+      <StudentCard>
+        <h1 className="app-title">Welcome {found?.name}</h1>
+        <p className="student-found-name">Enrollment: {found?.masked_enrollment}</p>
+        <p className={`time-remaining ${windowExpired ? "expired" : ""}`}>
+          Time remaining: {formatMMSS(timeLeft)}
+        </p>
+        {role === "cr" ? (
+          <p className="warning-text">
+            You are signed in as a CR. Attendance marking is for students.
+          </p>
+        ) : (
+          <button
+            className="btn btn-primary btn-large"
+            onClick={handleSubmit}
+            disabled={busy || windowExpired}
+          >
+            {busy ? "Processing…" : "Continue to Attendance"}
+          </button>
+        )}
+        {windowExpired && (
+          <p className="failed-reason">
+            Attendance window expired. Please scan the current QR code again.
+          </p>
+        )}
+        <ErrorBox message={errorText} />
+      </StudentCard>
+    );
+  }
+
+  if (stage === "last3") {
+    return (
+      <StudentCard>
+        <h1 className="app-title">Student Attendance</h1>
+        <p className="session-detected">Session detected.</p>
+        <p className={`time-remaining ${windowExpired ? "expired" : ""}`}>
+          Time remaining: {formatMMSS(timeLeft)}
+        </p>
+        {role === "cr" ? (
+          <p className="warning-text">
+            You are signed in as a CR. Attendance marking is for students.
+          </p>
+        ) : (
+          <form onSubmit={handleLookup} disabled={windowExpired}>
+            <label>
+              Enter the last 3 digits of your enrollment number
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="\d{3}"
+                title="Exactly 3 digits"
+                value={last3}
+                onChange={(e) => setLast3(e.target.value.replace(/\D/g, "").slice(0, 3))}
+                placeholder="e.g. 001"
+                required
+                minLength={3}
+                maxLength={3}
+                disabled={windowExpired || busy}
+                autoFocus
+              />
+            </label>
+            <button
+              className="btn btn-primary btn-large"
+              type="submit"
+              disabled={windowExpired || busy || last3.length !== 3}
+            >
+              {busy ? "Processing…" : "Find My Record"}
+            </button>
+          </form>
+        )}
+        {windowExpired && (
+          <p className="failed-reason">
+            Attendance window expired. Please scan the current QR code again.
+          </p>
+        )}
+        {locationWarning && <p className="warning-text">{locationWarning}</p>}
+        <ErrorBox message={errorText || authError} />
+      </StudentCard>
+    );
+  }
+
+  if (stage === "confirm") {
+    return (
+      <StudentCard>
+        <h2 className="student-found-title">Student Found</h2>
+        <div className="student-found-box">
+          <p className="student-found-name">{found?.name}</p>
+          <p className="student-found-enrollment">
+            Enrollment: {found?.masked_enrollment}
+          </p>
+        </div>
+        <p className={`time-remaining ${windowExpired ? "expired" : ""}`}>
+          Time remaining: {formatMMSS(timeLeft)}
+        </p>
+        <p className="muted">
+          Is this you? Attendance is only marked after you confirm.
+        </p>
+        <button
+          className="btn btn-primary btn-large"
+          onClick={handleSubmit}
+          disabled={busy || windowExpired}
+        >
+          {busy ? "Processing…" : "Confirm & Mark Attendance"}
+        </button>
+        <button
+          className="btn btn-ghost"
+          onClick={() => {
+            setFound(null);
+            setLast3("");
+            setStage("last3");
+          }}
+          disabled={busy}
+        >
+          Not you? Re-enter digits
+        </button>
+        <ErrorBox message={errorText} />
       </StudentCard>
     );
   }
@@ -156,83 +370,37 @@ export default function StudentAttendance() {
   }
 
   if (stage === "failed") {
-    const expired = expiredRef.current;
     return (
       <StudentCard>
         <h2 className="failed-title">Attendance Not Marked</h2>
         <p className="failed-reason">
-          {submitError ||
-            (expired
-              ? "Attendance window expired. Please scan the current QR code again."
-              : "Something went wrong.")}
+          {errorText || "Something went wrong."}
         </p>
-        {!expired && submitError && timeLeft > 0 && (
-          <button className="btn btn-primary" onClick={() => setStage("form")}>
-            Try Again
-          </button>
-        )}
         <p className="muted hint">If your QR expired, scan the current code again.</p>
       </StudentCard>
     );
   }
 
-  // stage === "form"
-  const windowExpired = timeLeft <= 0;
+  // stage === "retry": recoverable failure (radius, mismatch, timeout…)
   return (
     <StudentCard>
-      <h1 className="app-title">Student Attendance</h1>
-      <p className="session-detected">Session detected.</p>
-      <p className={`time-remaining ${windowExpired ? "expired" : ""}`}>
-        Time remaining: {formatMMSS(timeLeft)}
+      <h2 className="failed-title">Attendance Not Marked</h2>
+      <p className="failed-reason">
+        {errorText ||
+          (windowExpired
+            ? "Attendance window expired. Please scan the current QR code again."
+            : "Something went wrong.")}
       </p>
-
-      {role === "cr" ? (
-        <p className="warning-text">
-          You are signed in as a CR. Attendance marking is for students.
-        </p>
-      ) : (
-        <form onSubmit={handleSubmit} disabled={windowExpired}>
-          <label>
-            Name
-            <input
-              type="text"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Your full name"
-              required
-              maxLength={120}
-              disabled={windowExpired}
-            />
-          </label>
-          <label>
-            Enrollment No.
-            <input
-              type="text"
-              value={enrollment}
-              onChange={(e) => setEnrollment(e.target.value)}
-              placeholder="e.g. MCA123"
-              required
-              maxLength={40}
-              disabled={windowExpired}
-            />
-          </label>
-          <button
-            className="btn btn-primary btn-large"
-            type="submit"
-            disabled={windowExpired}
-          >
-            Mark Attendance
-          </button>
-        </form>
+      {!windowExpired && (
+        <button
+          className="btn btn-primary"
+          onClick={handleSubmit}
+          disabled={busy}
+        >
+          {busy ? "Processing…" : "Try Again"}
+        </button>
       )}
-
-      {windowExpired && (
-        <p className="failed-reason">
-          Attendance window expired. Please scan the current QR code again.
-        </p>
-      )}
-      {locationWarning && <p className="warning-text">{locationWarning}</p>}
-      <ErrorBox message={authError} />
+      <p className="muted hint">If your QR expired, scan the current code again.</p>
     </StudentCard>
   );
 }
@@ -242,10 +410,15 @@ function mapError(err) {
   if (err.code === "QR_EXPIRED") return "QR code expired.";
   if (err.code === "QR_INVALID") return "Invalid QR code. Please scan the current QR.";
   if (err.code === "SESSION_NOT_ACTIVE") return "Attendance session has ended.";
+  if (err.code === "SESSION_NOT_FOUND") return "Attendance session not found.";
   if (err.code === "ATTENDANCE_WINDOW_EXPIRED")
     return "Attendance window expired. Please scan the current QR code again.";
   if (err.code === "STUDENT_NOT_FOUND")
-    return "Student details do not match our records.";
+    return "No student record matches these digits. Please check and try again.";
+  if (err.code === "MULTIPLE_STUDENTS_MATCH")
+    return "Multiple students found with these digits. Please contact your CR.";
+  if (err.code === "ENROLLMENT_NOT_VERIFIED")
+    return "Please verify your enrollment details first.";
   if (err.code === "OUTSIDE_LOCATION") return "You are outside the attendance location.";
   if (err.code === "ALREADY_MARKED") return "Attendance has already been marked.";
   if (err.code === "PERMISSION_DENIED") return "Location permission is required.";
