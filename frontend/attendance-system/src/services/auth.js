@@ -2,16 +2,32 @@
 // all authorization decisions happen in FastAPI).
 import {
   GoogleAuthProvider,
+  getRedirectResult,
   onAuthStateChanged,
-  signInWithPopup,
+  signInWithRedirect,
   signOut,
 } from "firebase/auth";
 import { auth } from "../firebase";
 
+// Full-page redirect instead of a popup: works even when the browser
+// blocks pop-ups. The page reloads after sign-in and the pending result is
+// consumed by completeRedirectSignIn().
 export function signInWithGoogle() {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
-  return signInWithPopup(auth, provider);
+  return signInWithRedirect(auth, provider);
+}
+
+// Called once on app boot: resolves with the credential when the app is
+// reloaded after the redirect. onAuthStateChanged also fires if the result
+// was already consumed by the SDK in this browser.
+export async function completeRedirectSignIn() {
+  try {
+    return await getRedirectResult(auth);
+  } catch (err) {
+    if (err?.code === "auth/popup-closed-by-user") return null;
+    throw err;
+  }
 }
 
 export function signOutUser() {

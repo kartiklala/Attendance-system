@@ -4,6 +4,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import * as api from "../services/api";
 import {
+  completeRedirectSignIn,
   getFirebaseIdToken,
   observeAuthUser,
   signInWithGoogle,
@@ -14,7 +15,7 @@ const AuthContext = createContext(null);
 
 export function AuthProvider({ children }) {
   const [firebaseUser, setFirebaseUser] = useState(undefined); // undefined = loading
-  const [role, setRole] = useState(null); // null | "cr" | "student"
+  const [role, setRole] = useState(null); // null | "admin" | "cr" | "student"
   const [profile, setProfile] = useState(null); // { uid, name, email, role }
   const [error, setError] = useState(null);
   // Set when the backend permanently rejects the application JWT and it
@@ -67,8 +68,13 @@ export function AuthProvider({ children }) {
     return () => api.setAuthRecovery(null, null);
   }, [authorize]);
 
-  // Bootstrap: restore an existing Firebase session and re-authorize.
+  // Bootstrap: restore an existing Firebase session and re-authorize. Also
+  // consume any pending redirect-sign-in result (Google login returns via
+  // full-page redirect, so the app reloads right after the account picker).
   useEffect(() => {
+    completeRedirectSignIn().catch((err) => {
+      if (mounted.current) setError(err.message || "Sign-in failed. Please try again.");
+    });
     const unsubscribe = observeAuthUser(async (user) => {
       setFirebaseUser(user || null);
       if (!user) {
@@ -87,20 +93,22 @@ export function AuthProvider({ children }) {
     return unsubscribe;
   }, [authorize]);
 
+  // Redirect flow: this kicks off navigation to Google and never resolves
+  // with a user — after the return reload the bootstrap effect above
+  // authorizes the signed-in account automatically.
   const login = useCallback(async () => {
     setError(null);
     try {
-      const result = await signInWithGoogle();
-      const token = await result.user.getIdToken(true);
-      return await authorize(token);
+      await signInWithGoogle();
     } catch (err) {
-      const message = err?.code === "auth/popup-closed-by-user"
-        ? "Sign-in was cancelled."
-        : err?.message || "Sign-in failed. Please try again.";
+      const message =
+        err?.code === "auth/popup-closed-by-user"
+          ? "Sign-in was cancelled."
+          : err?.message || "Sign-in failed. Please try again.";
       setError(message);
       throw err;
     }
-  }, [authorize]);
+  }, []);
 
   const logout = useCallback(async () => {
     try {
@@ -119,7 +127,7 @@ export function AuthProvider({ children }) {
       value={{
         firebaseUser,   // Firebase user object or null (undefined while loading)
         profile,        // { uid, name, email, role } from the backend
-        role,           // "cr" | "student" | null
+        role,           // "admin" | "cr" | "student" | null
         error,
         requiresReauth, // JWT rejected and could not be re-issued
         login,

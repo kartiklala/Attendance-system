@@ -58,8 +58,8 @@ export default function Login() {
   return (
     <div className="page-center">
       <div className="card">
-        <h1 className="app-title">Student Attendance System</h1>
-        <p className="app-subtitle">Sign in with your college Google account</p>
+        <h1 className="app-title">Attendify Attendance System</h1>
+        <p className="app-subtitle">Sign in with your Google account</p>
 
         <div className={`location-status ${locationState}`}>
           {locationState === "prompting" && "Requesting location access…"}
@@ -81,7 +81,7 @@ export default function Login() {
             disabled={loggingIn}
           >
             <GoogleIcon />
-            {loggingIn ? "Signing in…" : "Sign in with Google"}
+            {loggingIn ? "Redirecting to Google…" : "Sign in with Google"}
           </button>
         ) : role === "student" ? (
           <div className="student-wait">
