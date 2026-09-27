@@ -70,7 +70,8 @@ def get_db() -> firestore.Client:
 
 # ---- Collection helpers -------------------------------------------------
 
-COLLECTION_ADMIN_LIST = "admin_list"
+COLLECTION_ADMIN_LIST = "admin_list"   # CR emails (existing mechanism)
+COLLECTION_ADMINS = "admins"           # admin emails (role hierarchy: admin > cr)
 COLLECTION_USERS = "users"
 COLLECTION_SESSIONS = "sessions"
 COLLECTION_SESSION_STATE = "session_state"

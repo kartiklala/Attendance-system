@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.firebase import init_firebase, is_available
-from app.routers import attendance, auth
+from app.routers import admin, attendance, auth
 from app.services.errors import APIError
 
 # ---- Logging ------------------------------------------------------------
@@ -46,6 +46,7 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(attendance.router)
+app.include_router(admin.router)
 
 
 # ---- Exception handlers (consistent error shape, no internals leaked) ----

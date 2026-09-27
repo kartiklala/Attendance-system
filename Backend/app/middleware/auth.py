@@ -1,6 +1,6 @@
 """Reusable FastAPI auth dependencies built on the HttpOnly application JWT.
 
-get_current_user() -> require_cr() / require_student()
+get_current_user() -> require_cr() / require_student() / require_admin()
 No endpoint repeats JWT verification code.
 """
 from dataclasses import dataclass
@@ -10,6 +10,8 @@ from fastapi import Depends, Request
 from app.core.config import settings
 from app.core.security import JWTError, decode_application_jwt
 from app.services.errors import ForbiddenError, UnauthorizedError
+
+VALID_ROLES = ("admin", "cr", "student")
 
 
 @dataclass(frozen=True)
@@ -32,7 +34,7 @@ def get_current_user(request: Request) -> CurrentUser:
 
     uid = payload.get("sub")
     role = payload.get("role")
-    if not uid or role not in ("cr", "student"):
+    if not uid or role not in VALID_ROLES:
         raise UnauthorizedError("Invalid authentication token.")
     return CurrentUser(uid=uid, role=role, email=payload.get("email", "") or "")
 
@@ -47,4 +49,13 @@ def require_cr(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
 def require_student(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
     if user.role != "student":
         raise ForbiddenError("Only students can perform this action.", code="STUDENT_ONLY")
+    return user
+
+
+def require_admin(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
+    """Admin-only APIs. A student/CR calling these manually gets 403 — the
+    role comes from the backend-signed JWT, never from the request body."""
+    if user.role != "admin":
+        raise ForbiddenError("Only an administrator can perform this action.",
+                             code="ADMIN_ONLY")
     return user

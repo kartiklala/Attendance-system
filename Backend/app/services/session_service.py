@@ -60,7 +60,9 @@ def get_active_session() -> dict | None:
     return data
 
 
-def create_or_get_session(cr_uid: str, latitude: float, longitude: float) -> tuple[dict, bool]:
+def create_or_get_session(
+    cr_uid: str, latitude: float, longitude: float, session_name: str
+) -> tuple[dict, bool]:
     """Race-safe start-or-join: returns (session, created_new).
 
     If any active session already exists the CR joins it instead of creating
@@ -81,11 +83,14 @@ def create_or_get_session(cr_uid: str, latitude: float, longitude: float) -> tup
                 return existing_id, False
         transaction.set(sessions.document(new_id), {
             "session_id": new_id,
+            "session_name": session_name,
             "cr_uid": cr_uid,
             "latitude": latitude,
             "longitude": longitude,
             "radius_meters": settings.ATTENDANCE_RADIUS_METERS,
             "status": "active",
+            "qr_lifetime_seconds": settings.QR_TOKEN_LIFETIME_SECONDS,
+            "sheet_title": None,
             "started_at": _utcnow_iso(),
             "ended_at": None,
             "started_by": cr_uid,
@@ -96,11 +101,46 @@ def create_or_get_session(cr_uid: str, latitude: float, longitude: float) -> tup
     session_id, created = _txn(db.transaction())
     session = get_session(session_id)
     if created:
-        logger.info("CR created shared session %s (radius=%sm)",
-                    session_id, session.get("radius_meters"))
+        logger.info("CR created shared session %s name=%r (radius=%sm)",
+                    session_id, session_name, session.get("radius_meters"))
+        # Per-session Google Sheet tab (ABSENT roster copy). Best-effort:
+        # the session stays functional if the Sheets API is unavailable —
+        # Firestore remains the source of truth.
+        try:
+            from app.services import sheets_service
+
+            title = sheets_service.create_session_sheet(session_id, session_name)
+            db.collection(COLLECTION_SESSIONS).document(session_id).update(
+                {"sheet_title": title}
+            )
+            session["sheet_title"] = title
+        except Exception:
+            logger.exception("Could not create the per-session sheet tab for %s",
+                             session_id)
     else:
         logger.info("CR joined existing active session %s", session_id)
     return session, created
+
+
+def set_qr_lifetime(session_id: str, lifetime_seconds: int) -> int:
+    """CR-adjustable QR lifetime. Applied to FUTURE token rotations; the
+    current token keeps its own expiry until the next rotation. The backend
+    validates against the allowed values — the frontend decides nothing."""
+    if lifetime_seconds not in settings.QR_ALLOWED_LIFETIME_SECONDS:
+        raise BadRequestError(
+            "Invalid QR lifetime. Allowed values: "
+            + ", ".join(f"{s}s" for s in settings.QR_ALLOWED_LIFETIME_SECONDS) + ".",
+            code="INVALID_QR_LIFETIME",
+        )
+    session = get_session(session_id)
+    if session.get("status") != "active":
+        raise BadRequestError("Attendance session is no longer active.",
+                              code="SESSION_NOT_ACTIVE")
+    get_db().collection(COLLECTION_SESSIONS).document(session_id).update(
+        {"qr_lifetime_seconds": lifetime_seconds}
+    )
+    logger.info("QR lifetime set to %ss session_id=%s", lifetime_seconds, session_id)
+    return lifetime_seconds
 
 
 def end_session(session_id: str, cr_uid: str) -> dict:

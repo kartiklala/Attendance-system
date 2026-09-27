@@ -9,12 +9,16 @@ Order of checks performed for every /attendance/check call:
 6. Enrollment still matches the authoritative Google Sheet roster
 7. Distance between CR location and student location <= radius (Haversine)
 8. Duplicate prevention (per student per session, server-side)
-Then: write Firestore attendance document + Google Sheet PRESENT row.
+Then: write Firestore attendance document (with server-side audit fields:
+client IP, user-agent, derived device hash) + Google Sheet PRESENT row +
+per-session worksheet status flip, and flag suspicious same-IP/device use.
 
-Also provides the session statistics (jar fill / popups) and the final
-absentee summary — both computed strictly from server-side data.
+Also provides the session statistics (water fill / popups / proxy warnings)
+and the final absentee summary — both computed strictly from server-side data.
 """
+import hashlib
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from app.core.config import settings
@@ -32,12 +36,22 @@ def _attendance_doc_id(session_id: str, enrollment_no: str) -> str:
     return f"{session_id}__{normalized}"
 
 
-def mark_attendance(student_uid: str, payload) -> dict:
+def derive_device_hash(client_ip: str, user_agent: str) -> str:
+    """Privacy-conscious server-generated device identifier: a one-way hash
+    of the request's IP + user-agent (never sent to or computed by the
+    browser, never reversed into the raw values by the UI)."""
+    seed = f"{client_ip}|{user_agent}".encode("utf-8", errors="replace")
+    return hashlib.sha256(seed).hexdigest()[:16]
+
+
+def mark_attendance(student_uid: str, payload, client: dict | None = None) -> dict:
     """Validate everything and mark the student PRESENT.
 
     `payload` is an AttendanceCheckRequest (session_token + coordinates).
-    The student's identity is taken from the backend-verified enrollment
-    saved against their Firebase UID — never from the request body.
+    `client` carries the SERVER-observed request info {ip, user_agent} —
+    the request body can never supply or override these fields. The
+    student's identity is taken from the backend-verified enrollment saved
+    against their Firebase UID — never from the request body.
     """
     logger.info("Attendance validation attempted session_token=present")
 
@@ -79,15 +93,29 @@ def mark_attendance(student_uid: str, payload) -> dict:
 
     marked_at_iso = datetime.now(timezone.utc).isoformat()
 
+    # Audit fields come from the server-observed request only.
+    client = client or {}
+    client_ip = str(client.get("ip") or "")
+    user_agent = str(client.get("user_agent") or "")[:512]
+    device_hash = (
+        derive_device_hash(client_ip, user_agent) if client_ip else ""
+    )
+
     # Firestore record first (acts as the idempotency lock).
     ref.set({
         "session_id": session_id,
+        "session_name": session.get("session_name", ""),
         "student_uid": student_uid,
         "name": roster_name,
         "enrollment_no": roster_enrollment,
         "status": "PRESENT",
         "marked_at": marked_at_iso,
         "distance_meters": round(distance, 2),
+        "student_latitude": payload.latitude,
+        "student_longitude": payload.longitude,
+        "client_ip": client_ip,
+        "user_agent": user_agent,
+        "device_hash": device_hash,
     })
 
     # Google Sheet row. If the sheet write fails, roll back the Firestore
@@ -98,6 +126,16 @@ def mark_attendance(student_uid: str, payload) -> dict:
         logger.exception("Sheet write failed; removing Firestore attendance record")
         ref.delete()
         raise
+
+    # Per-session worksheet: flip this student to PRESENT (best-effort —
+    # Firestore already recorded the attendance, so failures never reject it).
+    sheet_title = session.get("sheet_title")
+    if sheet_title:
+        try:
+            sheets_service.mark_student_present(sheet_title, roster_enrollment)
+        except Exception:
+            logger.exception("Could not update the session sheet tab %s",
+                             sheet_title)
 
     logger.info("Attendance successful session_id=%s distance=%.1fm",
                 session_id, distance)
@@ -132,7 +170,31 @@ def _uid_already_marked(session_id: str, student_uid: str) -> bool:
     return any(True for _ in docs)
 
 
-# ---- Live statistics (jar fill + present popups) ---------------------------
+# ---- Live statistics (water fill + present popups + proxy warnings) --------
+
+def _proxy_warnings(entries: list[dict]) -> list[str]:
+    """Flag (never reject) suspicious patterns: several DIFFERENT students
+    marking from the same device hash or the same client IP in one session.
+    Only the count is surfaced to the CR — raw IP/device data stays here."""
+    by_device = defaultdict(set)
+    by_ip = defaultdict(set)
+    for e in entries:
+        uid = e.get("student_uid")
+        if not uid:
+            continue
+        if e.get("device_hash"):
+            by_device[e["device_hash"]].add(uid)
+        if e.get("client_ip"):
+            by_ip[e["client_ip"]].add(uid)
+    warnings: list[str] = []
+    device_shares = sum(1 for uids in by_device.values() if len(uids) > 1)
+    ip_shares = sum(1 for uids in by_ip.values() if len(uids) > 1)
+    if device_shares:
+        warnings.append("\u26a0 Multiple students marked from the same device")
+    if ip_shares:
+        warnings.append("\u26a0 Multiple students detected from the same IP")
+    return warnings
+
 
 def get_session_stats(session_id: str) -> dict:
     """Present/total counts + most recent arrivals, all server-side data."""
@@ -157,11 +219,13 @@ def get_session_stats(session_id: str) -> dict:
     percentage = round((present_count / total) * 100, 2) if total else 0.0
     return {
         "session_id": session_id,
+        "session_name": session.get("session_name", ""),
         "session_status": session.get("status", "unknown"),
         "total_students": total,
         "present_count": present_count,
         "percentage": percentage,
         "recent": recent,
+        "warnings": _proxy_warnings(entries),
     }
 
 
@@ -198,12 +262,17 @@ def get_session_summary(session_id: str) -> dict:
     absent_count = total - present_count
     percentage = round((present_count / total) * 100, 2) if total else 0.0
 
+    # Absentees sorted ASCENDING by enrollment number (string compare keeps
+    # leading zeros intact; never sorted by name).
+    absentees.sort(key=lambda a: a["enrollment_no"])
+
     return {
         "session_id": session_id,
+        "session_name": session_data.get("session_name", ""),
         "status": session_data.get("status", "unknown"),
         "total_students": total,
         "present_count": present_count,
         "absent_count": absent_count,
         "percentage": percentage,
-        "absentees": sorted(absentees, key=lambda a: a["name"].lower()),
+        "absentees": absentees,
     }

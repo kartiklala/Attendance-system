@@ -1,16 +1,20 @@
 """Google Sheets access via a service account (backend-only, never frontend).
 
-Two worksheets are used from the configured spreadsheet:
+Worksheets inside the configured spreadsheet:
 - settings.GOOGLE_STUDENTS_SHEET_NAME: authoritative student roster
-  (columns: Enrollment No | Name)
+  (columns: Enrollment No | Name) — never modified here
 - settings.GOOGLE_SHEET_NAME: attendance log
   (columns: Timestamp | Enrollment No | Student Name | Status | Session-ID)
+- one worksheet PER SESSION (created on session start): a copy of the roster
+  with a Status column, ABSENT/red initially and PRESENT/green once the
+  backend records valid attendance.
 """
 import logging
+import re
 from datetime import datetime, timezone
 
 import gspread
-from gspread.exceptions import GSpreadException
+from gspread.exceptions import APIError, GSpreadException
 
 from app.core.config import settings
 from app.services.errors import ServiceUnavailableError
@@ -18,6 +22,16 @@ from app.services.errors import ServiceUnavailableError
 logger = logging.getLogger(__name__)
 
 _client: gspread.Client | None = None
+_spreadsheet = None
+
+
+def _rgba(red: float, green: float, blue: float) -> dict:
+    """Google Sheets API color value (gspread passes format dicts through)."""
+    return {"red": red, "green": green, "blue": blue, "alpha": 1.0}
+
+
+GREEN = _rgba(0.13, 0.55, 0.13)
+RED = _rgba(0.80, 0.12, 0.12)
 
 
 def _get_client() -> gspread.Client:
@@ -39,17 +53,24 @@ def _get_client() -> gspread.Client:
 
 
 def _open_sheet(sheet_name: str):
+    sheet = _open_spreadsheet().worksheet(sheet_name)
+    return sheet
+
+
+def _open_spreadsheet():
+    """Cached spreadsheet handle (the service account must have access)."""
+    global _spreadsheet
     client = _get_client()
+    if _spreadsheet is not None:
+        return _spreadsheet
     if not settings.GOOGLE_SHEET_ID or settings.GOOGLE_SHEET_ID == "CHANGE_ME":
         raise ServiceUnavailableError("GOOGLE_SHEET_ID is not configured.")
     try:
-        spreadsheet = client.open_by_key(settings.GOOGLE_SHEET_ID)
-        return spreadsheet.worksheet(sheet_name)
+        _spreadsheet = client.open_by_key(settings.GOOGLE_SHEET_ID)
+        return _spreadsheet
     except gspread.SpreadsheetNotFound:
         logger.exception("Spreadsheet not found; is the sheet shared with the service account?")
         raise ServiceUnavailableError("Attendance spreadsheet not found.")
-    except gspread.WorksheetNotFound:
-        raise ServiceUnavailableError(f"Sheet '{sheet_name}' not found in spreadsheet.")
     except GSpreadException:
         logger.exception("Google Sheets error")
         raise ServiceUnavailableError("Google Sheets request failed.")
@@ -89,3 +110,117 @@ def fetch_student_roster() -> list[tuple[str, str]]:
         if len(row) >= 2 and str(row[0]).strip():
             roster.append((str(row[0]).strip(), str(row[1]).strip()))
     return roster
+
+
+# ---- Per-session worksheets -----------------------------------------------
+#
+# One tab per attendance session: "Enrollment ID | Student Name | Status".
+# Sheet1 stays the untouched master roster. These calls are best-effort from
+# the session/attendance services — Firestore remains the source of truth.
+
+_SESSION_SHEET_PREFIX = "ATT_"
+_UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
+
+
+def session_sheet_title(session_id: str, session_name: str) -> str:
+    """Deterministic tab name so a duplicate start request never creates a
+    second sheet: ATT_<short id>_<cleaned session name> (max 100 chars)."""
+    suffix = _UNSAFE_TAB_CHARS.sub("", session_name).strip()[:70] or "session"
+    short_id = session_id.replace("SESSION-", "")[-6:]
+    return f"{_SESSION_SHEET_PREFIX}{short_id}_{suffix}"[:100]
+
+
+def create_session_sheet(session_id: str, session_name: str) -> str:
+    """Create (or reuse) the session worksheet seeded with everyone ABSENT.
+
+    Returns the worksheet title. Enrollment numbers are written as TEXT so
+    leading zeros survive; PRESENT/ABSENT colours are conditional formats so
+    later status updates re-colour automatically.
+    """
+    spreadsheet = _open_spreadsheet()
+    roster = fetch_student_roster()
+    title = session_sheet_title(session_id, session_name)
+
+    # Idempotent: an existing tab (retry / duplicate submit) is reused as-is.
+    try:
+        spreadsheet.worksheet(title)
+        logger.info("Session sheet already exists title=%s", title)
+        return title
+    except gspread.WorksheetNotFound:
+        pass
+
+    try:
+        sheet = spreadsheet.add_worksheet(
+            title=title, rows=max(len(roster) + 1, 2), cols=3
+        )
+        body = [["Enrollment ID", "Student Name", "Status"]]
+        body += [[enr, name, "ABSENT"] for enr, name in roster]
+        requests = [
+            {
+                # Column A as plain text protects leading zeros.
+                "repeatCell": {
+                    "range": {"sheetId": sheet.id, "startColumnIndex": 0,
+                              "endColumnIndex": 1},
+                    "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                    "fields": "cell.userEnteredFormat.numberFormat",
+                }
+            },
+            {
+                "updateCells": {
+                    "range": {"sheetId": sheet.id},
+                    "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}}
+                                         for v in row]} for row in body],
+                    "fields": "userEnteredValue",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {"sheetId": sheet.id, "startRowIndex": 0, "endRowIndex": 1},
+                    "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+                    "fields": "cell.userEnteredFormat.textFormat.bold",
+                }
+            },
+        ]
+        sheet.batch_update(requests)
+        # Conditional formats via the native API (bold red ABSENT / green PRESENT).
+        sheet.format(
+            f"C2:C{max(len(roster) + 1, 2)}",
+            {
+                "conditionalFormats": [
+                    {
+                        "type": "textContains",
+                        "values": [f'"ABSENT"'],
+                        "format": {"textFormat": {"foregroundColor": RED, "bold": True}},
+                    },
+                    {
+                        "type": "textContains",
+                        "values": [f'"PRESENT"'],
+                        "format": {"textFormat": {"foregroundColor": GREEN, "bold": True}},
+                    },
+                ]
+            },
+        )
+    except (GSpreadException, APIError):
+        logger.exception("Could not create the session sheet title=%s", title)
+        raise ServiceUnavailableError("Could not create the session Google Sheet.")
+    logger.info("Session sheet created title=%s students=%s", title, len(roster))
+    return title
+
+
+def mark_student_present(sheet_title: str, enrollment_no: str) -> None:
+    """Flip one student's Status cell to PRESENT in the session worksheet.
+    The enrollment comes from backend-verified data, never from user input."""
+    try:
+        sheet = _open_spreadsheet().worksheet(sheet_title)
+        # Exact match on the raw enrollment value; "" means not found.
+        found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
+        row = str(found[0][0]).strip() if found and found[0] else ""
+        if not row or not row.replace(".0", "").isdigit():
+            logger.warning("Enrollment not found on session sheet title=%s", sheet_title)
+            return
+        sheet.update(f"C{int(float(row))}", [["PRESENT"]],
+                     value_input_option="RAW")
+    except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
+        logger.warning("Session sheet is missing title=%s", sheet_title)
+    except (GSpreadException, APIError):
+        logger.exception("Could not mark PRESENT on the session sheet title=%s", sheet_title)

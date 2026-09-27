@@ -54,14 +54,16 @@ def build_qr_url(token: str) -> str:
     return f"{base}/attendance?token={token}"
 
 
-def _payload(raw_token: str, session_id: str, expires_at) -> dict:
+def _payload(raw_token: str, session_id: str, expires_at, lifetime_seconds: int) -> dict:
     exp = _parse(expires_at) or _utcnow()
     remaining = max(0, int((exp - _utcnow()).total_seconds()))
     return {
         "session_id": session_id,
         "qr_token": raw_token,
         "qr_url": build_qr_url(raw_token),
-        "expires_in_seconds": settings.QR_TOKEN_LIFETIME_SECONDS,
+        # The lifetime configured for THIS session (CR-adjustable via
+        # /qr/lifetime) — never a value the frontend decides on its own.
+        "expires_in_seconds": lifetime_seconds,
         # countdown_seconds is the REMAINING lifetime of the current token so
         # every CR's display stays in sync with the server rotation.
         "countdown_seconds": remaining,
@@ -91,6 +93,13 @@ def get_current_qr(session_id: str) -> dict:
         now = _utcnow()
         current_hash = data.get("current_qr_hash")
         current_exp = _parse(data.get("current_qr_expires_at"))
+        # Lifetime the CR configured for this session (falls back to the
+        # server default for sessions created before the setting existed).
+        try:
+            lifetime = int(data.get("qr_lifetime_seconds")
+                           or settings.QR_TOKEN_LIFETIME_SECONDS)
+        except (TypeError, ValueError):
+            lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
 
         # Firestore transactions require ALL reads before ANY write, so the
         # old token document is fetched up-front and reused below.
@@ -104,12 +113,13 @@ def get_current_qr(session_id: str) -> dict:
         if current_exp and now < current_exp and old_snapshot is not None and old_snapshot.exists:
             doc_data = old_snapshot.to_dict() or {}
             if doc_data.get("active") and doc_data.get("token"):
-                return _payload(doc_data["token"], session_id, doc_data.get("expires_at"))
+                return _payload(doc_data["token"], session_id,
+                                doc_data.get("expires_at"), lifetime)
 
         # Rotate: create the next token and point the session at it.
         raw = secrets.token_urlsafe(24)  # cryptographically random
         token_hash = _hash_token(raw)
-        expires_at = now + timedelta(seconds=settings.QR_TOKEN_LIFETIME_SECONDS)
+        expires_at = now + timedelta(seconds=lifetime)
         transaction.set(tokens.document(token_hash), {
             "session_id": session_id,
             "token_hash": token_hash,
@@ -126,8 +136,8 @@ def get_current_qr(session_id: str) -> dict:
             "current_qr_hash": token_hash,
             "current_qr_expires_at": _iso(expires_at),
         })
-        logger.info("QR generated session_id=%s", session_id)
-        return _payload(raw, session_id, _iso(expires_at))
+        logger.info("QR generated session_id=%s lifetime=%ss", session_id, lifetime)
+        return _payload(raw, session_id, _iso(expires_at), lifetime)
 
     return _txn(db.transaction())
 
@@ -225,12 +235,11 @@ def validate_token_for_check(raw_token: str) -> tuple[dict, dict]:
     if window_expires_at is None:
         # Student submitted without a prior scan: allow only a freshly issued,
         # still-current token (never redeem an arbitrarily old/rotated token).
-        created_at = _parse(record.get("created_at"))
-        grace = timedelta(
-            seconds=settings.QR_TOKEN_LIFETIME_SECONDS
-            + settings.STUDENT_SESSION_MINUTES * 60
-        )
-        if not record.get("active") or (created_at and now - created_at > grace):
+        # The grace uses the TOKEN's own expiry so CR-adjustable lifetimes
+        # (5-60s) are honoured regardless of the server default.
+        token_exp = _parse(record.get("expires_at")) or _utcnow()
+        grace_end = token_exp + timedelta(minutes=settings.STUDENT_SESSION_MINUTES)
+        if not record.get("active") or now > grace_end:
             raise BadRequestError("The QR code has expired.", code="QR_EXPIRED")
     elif now > window_expires_at:
         raise BadRequestError(

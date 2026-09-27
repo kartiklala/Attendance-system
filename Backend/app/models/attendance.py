@@ -77,11 +77,15 @@ class PresentEvent(BaseModel):
 
 class SessionStats(BaseModel):
     session_id: str
+    session_name: str = ""
     session_status: str
     total_students: int
     present_count: int
     percentage: float
     recent: list[PresentEvent] = []
+    # Human-readable proxy-attendance flags ("⚠ Multiple students…").
+    # Raw IP/device data is never exposed here.
+    warnings: list[str] = []
 
 
 class StatsResponse(BaseModel):
@@ -96,6 +100,7 @@ class Absentee(BaseModel):
 
 class AttendanceSummary(BaseModel):
     session_id: str
+    session_name: str = ""
     status: str
     total_students: int
     present_count: int

@@ -481,19 +481,19 @@ form input:focus {
 }
 
 /* ---- "Student present" floating popups ------------------------------------ */
+/* Full-viewport invisible track: popups start at the BOTTOM edge and rise
+   toward the top-right corner of the screen. */
 .popup-layer {
   position: fixed;
-  top: 16px;
-  right: 16px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  inset: 0;
   pointer-events: none; /* never block the CR's controls */
   z-index: 20;
 }
 
 .present-popup {
+  position: absolute;
+  right: 18px;
+  bottom: -60px; /* start just below the visible viewport */
   padding: 6px 14px;
   border-radius: 999px;
   background: #dcfce7;
@@ -503,14 +503,16 @@ form input:focus {
   font-size: 0.85rem;
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(22, 101, 52, 0.18);
-  animation: popup-float 4.2s ease forwards;
+  /* 100vh climb ≈ full travel; staggered animation-delay keeps close
+     arrivals from completely overlapping each other. */
+  animation: popup-rise 4.2s ease-out forwards;
 }
 
-@keyframes popup-float {
-  0% { opacity: 0; transform: translateY(14px); }
-  12% { opacity: 1; transform: translateY(0); }
-  75% { opacity: 1; }
-  100% { opacity: 0; transform: translateY(-46px); }
+@keyframes popup-rise {
+  0% { opacity: 0; transform: translateY(0); }
+  8% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(calc(-100vh - 80px)); }
 }
 
 /* The dashboard card must float above the water layer. */
@@ -655,10 +657,194 @@ form input:focus {
   min-width: 0;
 }
 
+/* ---- Session name + CR-adjustable QR lifetime ---------------------------- */
+.start-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.start-form-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #334155;
+  text-align: left;
+}
+
+.session-name {
+  margin: 2px 0 6px;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.qr-lifetime-control {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin: 6px 0 2px;
+}
+
+.qr-lifetime-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #334155;
+}
+
+.qr-lifetime-select {
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 0.9rem;
+  background: #fff;
+}
+
+.qr-lifetime-notice {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  color: #16a34a;
+}
+
+/* ---- Backend proxy-attendance warnings (CR-visible, no raw IPs) ---------- */
+.session-warnings {
+  margin: 6px auto 8px;
+  max-width: 340px;
+}
+
+.session-warnings p {
+  margin: 4px 0;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+/* ---- End-of-session summary extras --------------------------------------- */
+.summary-name {
+  margin: -6px 0 0;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.absentee-table {
+  display: block;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  text-align: left;
+  overscroll-behavior: contain;
+}
+
+/* Inner table needs an explicit width once the element scrolls as a block. */
+.absentee-table thead,
+.absentee-table tbody {
+  display: table;
+  width: 100%;
+  table-layout: fixed;
+}
+
+.absentee-table th,
+.absentee-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid #e2e8f0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.absentee-table thead th {
+  position: sticky;
+  top: 0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.absentee-enr {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #b91c1c;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.summary-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* ---- Admin dashboard ------------------------------------------------------ */
+.admin-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 18px;
+  text-align: left;
+}
+
+.section-title {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.admin-add-form {
+  display: flex;
+  gap: 10px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+
+.admin-add-form input {
+  flex: 1;
+  min-width: 200px;
+}
+
+.admin-notice {
+  margin: 0;
+  color: #16a34a;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.admin-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-cr-list {
+  margin: 0;
+  padding: 10px 12px 10px 30px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #fff;
+  overscroll-behavior: contain;
+}
+
+.admin-cr-list li {
+  padding: 3px 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+}
+
 /* ---- Responsive ----------------------------------------------------------- */
 @media (max-width: 480px) {
   .popup-layer {
-    top: 10px;
+    right: 0;
+  }
+
+  .present-popup {
     right: 10px;
   }
 

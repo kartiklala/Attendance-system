@@ -31,6 +31,7 @@ export default function Login() {
   // Step 6: route by the role returned from POST /authorize-user.
   useEffect(() => {
     if (role === "cr") navigate("/cr", { replace: true });
+    if (role === "admin") navigate("/admin", { replace: true });
   }, [role, navigate]);
 
   const handleLogin = async () => {

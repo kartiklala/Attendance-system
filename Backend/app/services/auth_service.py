@@ -1,21 +1,36 @@
 """Authentication service: Firebase ID token verification + role determination.
 
-CR identity is decided HERE (never by the frontend) by matching the user's
-email against the Firestore `admin_list` collection.
+Roles are decided HERE (never by the frontend):
+- `admins` collection email      -> "admin"   (manages the CR list)
+- `admin_list` collection email  -> "cr"      (runs attendance sessions)
+- everyone else                  -> "student"
+Being an admin does NOT make you a CR — the lists are independent.
 """
 import logging
+import re
 
 import firebase_admin.auth as firebase_auth
 from google.cloud import firestore
 
-from app.core.firebase import COLLECTION_ADMIN_LIST, COLLECTION_USERS, get_db
+from app.core.firebase import (
+    COLLECTION_ADMIN_LIST,
+    COLLECTION_ADMINS,
+    COLLECTION_USERS,
+    get_db,
+)
 from app.services.errors import UnauthorizedError
 
 logger = logging.getLogger(__name__)
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
 
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
+
+
+def is_valid_email(email: str) -> bool:
+    return bool(EMAIL_RE.match(email or ""))
 
 
 def verify_firebase_id_token(id_token: str) -> dict:
@@ -39,17 +54,17 @@ def verify_firebase_id_token(id_token: str) -> dict:
     }
 
 
-def is_cr_email(email: str) -> bool:
-    """Check the admin_list collection for this email."""
+def _email_in_collection(collection: str, email: str) -> bool:
+    """Membership check tolerant of mixed-case values already stored."""
     db = get_db()
     target = normalize_email(email)
     if not target:
         return False
-    docs = db.collection(COLLECTION_ADMIN_LIST).where("email", "==", target).limit(1).stream()
+    docs = db.collection(collection).where("email", "==", target).limit(1).stream()
     for _ in docs:
         return True
-    # Also tolerate mixed-case values already stored in admin_list.
-    docs = db.collection(COLLECTION_ADMIN_LIST).stream()
+    # Also tolerate mixed-case values already stored in the collection.
+    docs = db.collection(collection).stream()
     for doc in docs:
         stored = normalize_email((doc.to_dict() or {}).get("email", ""))
         if stored == target:
@@ -57,8 +72,22 @@ def is_cr_email(email: str) -> bool:
     return False
 
 
+def is_cr_email(email: str) -> bool:
+    """Check the admin_list (CR) collection for this email."""
+    return _email_in_collection(COLLECTION_ADMIN_LIST, email)
+
+
+def is_admin_email(email: str) -> bool:
+    """Check the dedicated admins collection for this email."""
+    return _email_in_collection(COLLECTION_ADMINS, email)
+
+
 def determine_role(email: str) -> str:
-    return "cr" if is_cr_email(email) else "student"
+    if is_admin_email(email):
+        return "admin"
+    if is_cr_email(email):
+        return "cr"
+    return "student"
 
 
 def upsert_user(uid: str, name: str, email: str, role: str) -> None:

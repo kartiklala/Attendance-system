@@ -1,11 +1,13 @@
 // App shell: routing + auth provider.
-// Routes: "/" (login), "/cr" (CR dashboard), "/attendance" (student QR flow).
+// Routes: "/" (login), "/cr" (CR dashboard), "/admin" (admin dashboard),
+// "/attendance" (student QR flow).
 // UI selection is based on the backend authorization response, but every
 // security decision is enforced by FastAPI.
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import Login from "./pages/Login";
 import CRDashboard from "./pages/CRDashboard";
+import AdminDashboard from "./pages/AdminDashboard";
 import StudentAttendance from "./pages/StudentAttendance";
 import ErrorPage from "./pages/ErrorPage";
 import { Loading } from "./components/ui";
@@ -23,6 +25,19 @@ function CRRoute() {
   return <CRDashboard />;
 }
 
+function AdminRoute() {
+  const { firebaseUser, role, requiresReauth } = useAuth();
+  if (firebaseUser === undefined || (firebaseUser && role === null)) {
+    if (requiresReauth) return <Navigate to="/" replace />;
+    return <Loading label="Checking your access…" />;
+  }
+  if (!firebaseUser) return <Navigate to="/" replace />;
+  // Role comes from the backend-signed JWT; the /admin/* APIs are also
+  // admin-protected server-side, so this is UI routing, not a security gate.
+  if (role !== "admin") return <ErrorPage message="This area is only available to administrators." />;
+  return <AdminDashboard />;
+}
+
 function App() {
   return (
     <AuthProvider>
@@ -30,6 +45,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Login />} />
           <Route path="/cr" element={<CRRoute />} />
+          <Route path="/admin" element={<AdminRoute />} />
           <Route path="/attendance" element={<StudentAttendance />} />
           <Route path="*" element={<ErrorPage />} />
         </Routes>

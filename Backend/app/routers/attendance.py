@@ -1,7 +1,7 @@
 """Attendance routes: shared CR session control, QR rotation, student flow."""
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
 from app.core.config import settings
 from app.middleware.auth import CurrentUser, get_current_user, require_cr, require_student
@@ -20,6 +20,8 @@ from app.models.session import (
     ActiveSessionResponse,
     EndAttendanceRequest,
     EndAttendanceResponse,
+    QRLifetimeRequest,
+    QRLifetimeResponse,
     QRRefreshRequest,
     QRRefreshResponse,
     SessionInfo,
@@ -43,14 +45,28 @@ router = APIRouter(tags=["attendance"])
 def _session_info(session: dict) -> SessionInfo:
     return SessionInfo(
         session_id=session["session_id"],
+        session_name=session.get("session_name", ""),
         cr_uid=session.get("cr_uid", ""),
         latitude=float(session.get("latitude", 0)),
         longitude=float(session.get("longitude", 0)),
         radius_meters=float(session.get("radius_meters", settings.ATTENDANCE_RADIUS_METERS)),
         status=session.get("status", "active"),
+        qr_lifetime_seconds=int(session.get("qr_lifetime_seconds")
+                                or settings.QR_TOKEN_LIFETIME_SECONDS),
         started_at=str(session.get("started_at", "")),
         ended_at=session.get("ended_at"),
     )
+
+
+def _client_info(request: Request) -> dict:
+    """SERVER-observed request info for the attendance audit trail. Students
+    never send or control these fields. Behind Render/Firebase proxies the
+    real client IP is in the left-most X-Forwarded-For entry."""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (
+        request.client.host if request.client else ""
+    )
+    return {"ip": ip[:64], "user_agent": request.headers.get("user-agent", "")}
 
 
 # ---- CR: shared session lifecycle ------------------------------------------
@@ -81,12 +97,13 @@ def start_attendance(
     can never produce two active sessions.
     """
     session, created = session_service.create_or_get_session(
-        cr.uid, payload.latitude, payload.longitude
+        cr.uid, payload.latitude, payload.longitude, payload.session_name
     )
     qr = qr_service.get_current_qr(session["session_id"])
     return StartAttendanceResponse(
         success=True,
         session_id=session["session_id"],
+        session_name=session.get("session_name", ""),
         radius_meters=session["radius_meters"],
         is_new=created,
         qr=qr,
@@ -104,6 +121,18 @@ def refresh_qr(
     """
     qr = qr_service.get_current_qr(payload.session_id)
     return QRRefreshResponse(success=True, qr=qr)
+
+
+@router.post("/qr/lifetime", response_model=QRLifetimeResponse)
+def set_qr_lifetime(
+    payload: QRLifetimeRequest,
+    cr: CurrentUser = Depends(require_cr),
+) -> QRLifetimeResponse:
+    """CR-only: change how long FUTURE QR tokens of the shared session stay
+    valid. The requested value is validated against the backend allow-list;
+    the current token keeps its own expiry until the next rotation."""
+    lifetime = session_service.set_qr_lifetime(payload.session_id, payload.lifetime_seconds)
+    return QRLifetimeResponse(success=True, qr_lifetime_seconds=lifetime)
 
 
 @router.post("/end-attendance", response_model=EndAttendanceResponse)
@@ -220,12 +249,16 @@ def student_confirm(
 @router.post("/attendance/check", response_model=AttendanceCheckResponse)
 def attendance_check(
     payload: AttendanceCheckRequest,
+    request: Request,
     student: CurrentUser = Depends(require_student),
 ) -> AttendanceCheckResponse:
     """Student attendance submission. Identity comes from the backend-verified
     enrollment saved against the Firebase UID; every other check is enforced
-    server-side (see attendance_service.mark_attendance)."""
-    result = attendance_service.mark_attendance(student.uid, payload)
+    server-side (see attendance_service.mark_attendance). IP and user-agent
+    are captured from the actual HTTP request for the audit trail."""
+    result = attendance_service.mark_attendance(
+        student.uid, payload, client=_client_info(request)
+    )
     return AttendanceCheckResponse(
         success=True,
         status=result["status"],

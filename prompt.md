@@ -1,589 +1,722 @@
-I want you to modify the existing attendance system according to the requirements below.
+You are working on my existing Attendance System project.
+
+PROJECT STRUCTURE:
+
+attendance-system/
+├── frontend/        # React.js + Vite
+└── Backend/         # Python + FastAPI
+
+CURRENT ARCHITECTURE:
+
+React Frontend
+│ HTTPS REST APIs
+▼
+Python FastAPI Backend
+│
+├── Firebase Admin SDK → Firestore
+└── Google Sheets API → Google Sheets
 
 IMPORTANT:
 
-* First inspect the existing frontend and backend code before making changes.
-* Do NOT rewrite the entire application.
-* Preserve the current architecture and working functionality.
-* Make the smallest clean changes necessary.
-* Follow the existing React + Vite frontend and Python + FastAPI backend architecture.
 * React must NOT directly access Firestore or Google Sheets.
-* All authentication, authorization, session state, student verification, attendance validation, duplicate prevention, and database/Google Sheets operations must remain backend-controlled.
-* Do not move security-sensitive logic to the frontend.
-* Do not store the application JWT in localStorage/sessionStorage.
-* Continue using the existing HttpOnly JWT cookie mechanism.
-* Do not break the existing Firebase Google authentication, Firebase Admin SDK, Firestore, Google Sheets, QR, location verification, or attendance functionality.
+* All authentication, authorization, attendance validation, session logic, roster lookup, duplicate prevention, and attendance status decisions must remain backend-controlled.
+* Do NOT rewrite unrelated existing functionality.
+* First inspect the current codebase and understand the existing implementation before making changes.
+* Preserve the existing Firebase Authentication + application JWT architecture.
+* Preserve the existing session ID, QR token, location validation, duplicate attendance prevention, and Google Sheet roster mechanisms unless a change below explicitly modifies their behavior.
+* Make changes incrementally and keep the existing functionality working.
 
 ==================================================
+REQUIRED CHANGES
+================
 
-1. MULTIPLE CRs MUST SHARE ONE ACTIVE ATTENDANCE SESSION
-   ==================================================
+1. RECORD DEVICE IP AND BROWSER INFORMATION
 
-Current behavior:
-After a CR successfully logs in and passes the `/authorize-user` API, the CR can start an attendance session.
+---
 
-Change this behavior:
+Add attendance audit information so that the system can identify potentially suspicious proxy attendance from the same device during the same session.
 
-* After `/authorize-user` confirms that the logged-in user has role `cr`, the backend must check Firestore for an existing ACTIVE attendance session.
-* If an active session already exists:
+For every successfully recorded attendance, the backend should record:
 
-  * Do NOT create another session.
-  * Return the existing active session information.
-  * The CR should automatically continue/rejoin that existing session.
-* If no active session exists:
-
-  * The CR should see the normal "Start Session Attendance" option.
-  * Clicking it creates a new active session.
-
-Example:
-
-CR 1:
-Login → authorize-user → no active session → Start Attendance → Session 1 created.
-
-CR 2:
-Login → authorize-user → Session 1 already active → automatically connect to Session 1.
-
-Both CR 1 and CR 2 must see the SAME:
-
-* session_id
-* active attendance state
-* attendance progress
-* QR token/session
-* present count
-* total student count
-
-There must never be two simultaneous active attendance sessions.
-
-Backend requirements:
-
-* The backend must be the source of truth for active session detection.
-* Do not rely only on React state.
-* Make the active-session lookup safe against race conditions so two CRs clicking at approximately the same time cannot accidentally create two active sessions.
-* Ending the session should end the shared session for ALL CRs connected to it.
-* If CR 1 ends the session, CR 2 must also see that the session has ended.
-
-==================================================
-2. INVALID JWT / EXPIRED SESSION MUST REMOVE "CONTINUE"
-=======================================================
-
-If the application JWT becomes invalid, expires, or is rejected by the backend:
-
-* The frontend must immediately treat the user as unauthenticated.
-* Do NOT continue showing a "Continue" button that allows the user to proceed with the old session.
-* This must also work when the user:
-
-  * clicks Back
-  * returns to a previous screen
-  * refreshes
-  * navigates between screens
-  * clicks Continue again
-  * opens an old attendance URL
-
-For any protected API that returns 401/UNAUTHORIZED because the application JWT is invalid or expired:
-
-1. Clear/reset the frontend authenticated-user state.
-2. Remove any stale attendance/session UI state.
-3. Do not show the Continue button.
-4. Redirect/show the login/Google authentication screen as appropriate.
-5. Require fresh authorization through `/authorize-user`.
-6. Do not attempt to reuse an expired JWT.
-
-Important:
-
-* The frontend must NOT try to inspect or decode the HttpOnly JWT itself.
-* The backend remains responsible for validating the JWT.
-* Use the existing `/me` or appropriate backend authentication mechanism if needed to restore/check authentication state.
-
-Also prevent UI race conditions where a user can click Continue while an authentication check is still in progress.
-
-==================================================
-3. STUDENT: ASK ONLY FOR LAST 3 DIGITS OF ENROLLMENT
-====================================================
-
-Change the student attendance flow.
-
-Current behavior:
-The student is asked to enter:
-
-* Name
-* Full enrollment number
-
-I no longer want this.
-
-New flow:
-
-Step 1:
-Student scans QR and authenticates with Google as currently implemented.
-
-Step 2:
-Ask ONLY:
-
-"Enter the last 3 digits of your enrollment number"
-
-Example:
-Student enters:
-
-001
-
-Step 3:
-Backend must use the authoritative Google Sheet `Sheet1` to find the matching student.
-
-The Google Sheet currently contains:
-
-Sheet1:
-
-Enrollment-ID | Name
-
-Example:
-
-2025001001 | Rahul Sharma
-2025001002 | Priya Singh
-2025001003 | Aman Kumar
-
-If the student enters:
-
-001
-
-the backend should identify the appropriate enrollment number ending in `001`.
+* Firebase UID
+* Enrollment number
+* Student name
+* Session ID
+* Session name
+* Timestamp
+* Student latitude/longitude if already being stored
+* Distance from CR if already being calculated
+* Client IP address
+* Browser/user-agent information
+* A privacy-conscious server/browser-generated device identifier if practical and reliable
 
 IMPORTANT:
 
-* The backend must perform this lookup.
-* React must NOT download the entire student roster and search locally.
-* Do not trust the student's submitted name.
-* Do not let the frontend decide which student is present.
+* Obtain IP information on the BACKEND, not from a frontend field.
+* Obtain browser/user-agent information from the HTTP request headers on the backend.
+* Do NOT attempt to collect IMEI, MAC address, phone serial number, SIM number, or other hardware identifiers.
+* Do NOT rely on IP/device information as the primary attendance authentication mechanism.
+* Existing Google authentication, verified student identity, QR/session validation, and location validation remain the primary mechanisms.
 
-After successful lookup:
+Add backend logic to detect/flag suspicious cases such as:
 
-Display on the student's screen:
+* Multiple different students marking attendance from the same device identifier during the same session.
+* Multiple different students using the same IP during the same session.
 
-"Student Found"
+Do NOT automatically reject attendance merely because students share an IP/device. Instead, make this an audit/flagging mechanism unless the existing architecture already has a clearly defined rejection rule.
 
-Name:
-Rahul Sharma
+The CR UI should be able to see a simple warning such as:
 
-Enrollment:
-********001
+"⚠ Multiple students marked from the same device"
 
-Then show a confirmation/submit button.
+or
 
-The student clicks Submit/Confirm.
+"⚠ Multiple students detected from the same IP"
 
-Only after confirmation should the backend perform the final attendance validation and mark attendance.
+Do NOT expose raw IP addresses to students.
 
-The backend must still perform all existing checks:
+Preferably keep detailed technical audit information backend-side and only expose the minimum information required to the CR/Admin.
 
-* authenticated student
-* valid application JWT
-* valid QR/session token
-* active attendance session
-* attendance time window
-* enrollment/student match
-* location within allowed radius
-* duplicate attendance prevention
-* Google Sheet attendance write
+==================================================
+2. CREATE A NEW GOOGLE SHEET FOR EVERY ATTENDANCE SESSION
+---------------------------------------------------------
 
-Do not weaken any existing validation.
+Whenever a NEW attendance session is successfully created, automatically create a new Google Sheets worksheet/tab for that session.
 
----
+IMPORTANT:
 
-## IMPORTANT: LAST 3 DIGITS MUST BE UNAMBIGUOUS
+* Do NOT create a new spreadsheet file unless the current Google Sheets architecture requires that.
+* Prefer creating a new worksheet/tab inside the existing attendance spreadsheet.
+* Each session must have its own attendance sheet/tab.
+* Existing Sheet1 remains the authoritative master student roster.
+* Existing Sheet2/current attendance mechanism must not be unnecessarily broken.
 
-If multiple students have the same last 3 digits:
+When a new session starts:
+
+1. Read the complete student roster from Sheet1.
+2. Create a new worksheet/tab for the newly created session.
+3. Copy the following information from Sheet1:
+
+   * Enrollment ID
+   * Student Name
+4. Add a Status column.
 
 Example:
 
-2025001001 → Rahul
-2026001001 → Amit
+## Enrollment ID | Student Name | Status
 
-Do NOT arbitrarily choose one.
+2026001       | Student A   | ABSENT
+2026002       | Student B   | ABSENT
+2026003       | Student C   | ABSENT
 
-Return an appropriate error such as:
+Initially every student must be ABSENT.
 
-"Multiple students found with these digits. Please contact your CR."
+When a student successfully marks attendance:
 
-However, if the existing enrollment data guarantees uniqueness, handle the normal single-match case.
+* Update that student's Status to PRESENT in the session-specific worksheet.
+* Do not trust the frontend to decide the status.
+* The backend must determine that attendance is valid and then update the sheet.
 
----
+Formatting:
 
-## SAVE STUDENT ↔ GOOGLE ACCOUNT ASSOCIATION
+* PRESENT should be displayed in GREEN.
+* ABSENT should be displayed in RED.
+* Use readable formatting and preserve the enrollment number/name.
+* Avoid creating duplicate session sheets if the same request is accidentally submitted twice.
+* The worksheet must be associated with the backend session ID so the correct sheet is always updated.
 
-After the student successfully confirms attendance for the first time, save the student's verified enrollment information against their Firebase/Google account in Firestore.
+IMPORTANT:
 
-For example, in the existing `users/{uid}` document:
+The existing Sheet1 must remain the master roster.
+
+Do not allow students or the frontend to modify the roster directly.
+
+Use the existing backend Google Sheets service and extend it rather than creating an unrelated second implementation.
+
+If the Google Sheets API requires additional permissions or configuration, keep the implementation compatible with the existing service account setup.
+
+==================================================
+3. SESSION NAME ENTERED BY CR
+-----------------------------
+
+When the CR clicks "Start Session", show a small UI asking for a Session Name.
+
+Example:
+
+Session Name:
+[ MCA Gen-AI - Morning Attendance ]
+
+[Start Session]
+
+The entered session name should be stored with the attendance session.
+
+IMPORTANT:
+
+This must NOT replace or modify the existing Session ID mechanism.
+
+The system must continue generating and using its existing unique Session ID internally.
+
+The session should contain both:
+
+session_id = existing unique backend-generated ID
+
+session_name = name entered by CR
+
+Example:
 
 {
-"uid": "...",
-"name": "Rahul Sharma",
-"email": "...",
-"role": "student",
-"enrollment_no": "2025001001"
+"session_id": "existing-generated-id",
+"session_name": "MCA Gen-AI - Morning Attendance",
+...
 }
 
-Use the existing user document structure where possible instead of creating unnecessary duplicate collections.
+The session name is for human readability/UI/Google Sheet identification only.
 
-The enrollment number must ONLY be saved after the backend has successfully verified it against Google Sheets.
+Session ID remains the authoritative technical identifier.
 
-On future attendance attempts:
+Validate the session name:
 
-* After Google authentication, check whether the authenticated Firebase UID already has a verified enrollment number saved in Firestore.
-* If it exists, do NOT ask the student for their enrollment digits again.
-* Display the saved student information and allow the student to continue through the attendance flow.
+* Trim whitespace.
+* Do not allow an empty session name.
+* Keep a reasonable maximum length.
+* Do not allow the session name to be used as an identifier/security token.
 
-Example:
-
-Google Login
-↓
-Backend authorization
-↓
-Firestore users/{uid}
-↓
-Enrollment already verified?
-↓
-YES
-↓
-Show:
-"Welcome Rahul Sharma"
-"Enrollment: ********001"
-↓
-Continue to attendance validation
-
-For a new Google account:
-
-Google Login
-↓
-No enrollment saved
-↓
-Ask for last 3 digits
-↓
-Verify against Sheet1
-↓
-Show student name
-↓
-Student confirms
-↓
-Save enrollment against Firebase UID
-
-Security requirements:
-
-* Never allow the frontend to directly write the enrollment number to Firestore.
-* Backend must verify the enrollment against Sheet1 before saving it.
-* Do not allow a student to arbitrarily change their saved enrollment number from the frontend.
-* If a saved enrollment exists, the backend should continue treating it as authoritative only if it was previously verified.
-* Do not expose the entire student roster to the frontend.
+Show the session name on the CR attendance screen and in the session-specific Google Sheet/tab name where practical.
 
 ==================================================
-4. CR SCREEN: LIVE JAR-FILLING ATTENDANCE ANIMATION
-===================================================
+4. ABSENTEE LIST SORTING + CSV/COPY
+-----------------------------------
 
-On the CR attendance screen, add a visually clean "jar filling" animation.
+After the CR ends an attendance session, show the absentee list.
 
-Purpose:
-Show how many students have marked PRESENT out of the total number of students.
+Currently absentees may be displayed alphabetically by name.
 
-Example:
+CHANGE THIS:
 
-Total students: 52
-Present: 26
-
-Display:
-
-26 / 52 Present
-50%
-
-And visually show a jar/container filling to approximately 50%.
-
-Requirements:
-
-* The fill percentage must come from backend attendance data.
-* Do NOT calculate attendance based only on local frontend state.
-* The frontend should periodically fetch/update the current session attendance statistics.
-* Avoid excessive API polling; use a reasonable interval or existing mechanism if one already exists.
-* The percentage should update automatically when students mark attendance.
-
-The jar should clearly show:
-
-* current percentage
-* present count
-* total student count
+Sort absentees in ASCENDING ORDER by Enrollment Number.
 
 Example:
 
-```
-      ______
-     /      \
-    |        |
-    |████████| 50%
-    |████████|
-    |        |
-    |________|
-```
+## Enrollment No | Name
 
-Use a polished modern UI suitable for a college attendance application.
+2026001       | Rahul
+2026004       | Amit
+2026010       | Priya
 
----
+Do NOT sort by student name.
 
-## STUDENT PRESENT POPUP ANIMATION
+Use the authoritative enrollment number from the backend roster.
 
-Whenever a student successfully marks attendance:
+Handle enrollment numbers correctly as strings where necessary so that leading zeros are not accidentally lost.
 
-Show a small floating popup/notification on the CR screen.
+Add two buttons:
+
+[Download CSV]
+
+[Copy Names]
+
+DOWNLOAD CSV:
+
+* Generate/download a CSV containing at minimum:
+  Enrollment Number
+  Student Name
 
 Example:
 
-"Rahul Sharma ✓"
+Enrollment Number,Student Name
+2026001,Rahul
+2026004,Amit
+2026010,Priya
+
+The CSV should be generated from backend-verified absentee data.
+
+COPY BUTTON:
+
+Copy the absentee names to the clipboard in a clean format.
+
+Example:
+
+Rahul
+Amit
+Priya
+
+Preferably provide a small confirmation such as:
+
+"Copied!"
+
+Do not require the CR to manually select text.
+
+==================================================
+5. CR UI TO INCREASE/DECREASE QR TOKEN LIFE
+-------------------------------------------
+
+Add a UI control on the CR attendance screen that allows the CR to increase or decrease how long the currently displayed QR token remains valid.
+
+Example UI:
+
+QR Valid For: 10 seconds
+
+[-]    10 sec    [+]
+
+or a dropdown:
+
+QR Lifetime:
+[ 10 seconds ▼ ]
+
+Allow reasonable predefined values, for example:
+
+5 seconds
+10 seconds
+15 seconds
+20 seconds
+30 seconds
+60 seconds
+
+The exact allowed values can be chosen based on the current implementation.
+
+IMPORTANT SECURITY REQUIREMENTS:
+
+* The frontend must NOT decide whether a QR token is valid.
+* The backend must create the QR token and determine its expiration.
+* The frontend only requests/changes the desired QR lifetime through a protected backend API.
+* Never put Firebase tokens, application JWTs, student information, or sensitive information inside the QR code.
+* QR tokens must remain random, short-lived, and server validated.
+
+When the CR changes the QR lifetime:
+
+* Apply it to newly generated/refreshed QR tokens.
+* Do not invalidate the existing attendance session.
+* Do not change the Session ID.
+* Do not change the existing CR session architecture.
+* Continue QR rotation according to the existing mechanism.
+
+Do not allow unreasonable values that could weaken security.
+
+The backend must validate the requested lifetime against an allowed minimum and maximum.
+
+==================================================
+6. ADD A NEW ADMIN ROLE
+-----------------------
+
+Add a new role:
+
+"admin"
+
+The existing roles are currently:
+
+* cr
+* student
+
+New roles:
+
+* admin
+* cr
+* student
+
+Admin should have a dedicated UI.
+
+ADMIN FUNCTION:
+
+Allow an Admin to add a new CR email address.
+
+Example:
+
+Admin Dashboard
+
+## Add New CR
+
+CR Email:
+[ [example@gmail.com](mailto:example@gmail.com) ]
+
+[Add CR]
+
+The backend must:
+
+1. Verify that the currently authenticated user is an Admin.
+2. Validate and normalize the email.
+3. Add/update the email in the authoritative Firebase/Firestore admin list currently used by the application.
+4. Ensure duplicate emails are handled safely.
+5. Return a success/error response.
+
+IMPORTANT:
+
+Do NOT let the frontend directly write to Firestore.
+
+The React frontend must call a protected FastAPI endpoint.
+
+Example conceptual endpoint:
+
+POST /admin/cr
+
+The backend should use the existing admin_list collection/mechanism rather than creating a duplicate authorization system.
+
+AUTHORIZATION:
+
+The existing CR authorization mechanism checks the admin_list collection to determine whether an email is a CR.
+
+Do NOT accidentally make every admin automatically become a CR unless explicitly intended.
+
+Keep the role hierarchy clear:
+
+ADMIN:
+
+* Can access Admin UI.
+* Can add/manage CR email addresses.
+* Can have appropriate administrative access.
+
+CR:
+
+* Can start/end attendance sessions.
+* Can view attendance statistics.
+* Can manage QR lifetime.
+* Can perform existing CR attendance functions.
+
+STUDENT:
+
+* Can mark their own attendance through the existing student flow.
+
+Backend must enforce these permissions regardless of what the frontend displays.
+
+IMPORTANT ADMIN SECURITY:
+
+Do not trust a role value sent by the frontend.
+
+The backend must derive/verify the authenticated user's role from the authenticated application identity and authoritative backend data.
+
+Do not allow a student to call the Admin API by manually constructing an HTTP request.
+
+==================================================
+7. FIX FLOATING STUDENT ATTENDANCE POPUPS
+-----------------------------------------
+
+The CR attendance screen currently displays floating notifications when a student successfully marks attendance.
+
+Example:
+
+"Rahul ✓"
+
+Current animation starts only a few pixels below the top.
+
+CHANGE THE ANIMATION:
+
+The student name notification should begin from the VERY BOTTOM of the visible screen and animate upward toward the TOP-RIGHT area.
+
+Desired behavior:
+
+BOTTOM OF SCREEN
+↑
+↑
+↑
+↑
+↑
+TOP-RIGHT
+
+Example:
+
+[Student Name ✓]
+↑
+↑
+↑
+↑
+↑
+bottom
 
 The notification should:
 
-* appear near the jar/dashboard
-* float upward
-* fade out automatically
-* not block the CR's controls
-* not require manual dismissal
+* Start from below/at the bottom edge of the viewport.
+* Move smoothly upward.
+* End/disappear near the top-right area.
+* Not start a few pixels below the top.
+* Have a smooth entrance and exit.
+* Not block the main CR controls.
+* Support multiple students arriving close together without completely overlapping each other.
 
-Multiple students marking attendance should create separate notifications without breaking the UI.
+Use the existing frontend notification/event mechanism if one already exists.
 
-IMPORTANT:
-The backend should provide the data needed for this.
-Do not trust a frontend-generated "student present" event.
-
-Only display a student as PRESENT after the backend has successfully recorded the attendance.
+Do not rewrite the entire CR UI just to change this animation.
 
 ==================================================
-5. AFTER END SESSION: SHOW ABSENTEES + PRESENT COUNT
-====================================================
+IMPORTANT EXISTING FUNCTIONALITY TO PRESERVE
+============================================
 
-When the CR clicks:
+Do NOT break or remove the following:
 
-"End Session"
+1. Firebase Google Authentication.
 
-the backend should close the active attendance session as it currently does.
+2. Backend Firebase ID token verification.
 
-After the session is successfully ended, show a final attendance summary screen.
+3. Backend-generated application JWT.
 
-The summary should contain:
+4. JWT stored in HttpOnly cookie.
 
-A. ABSENTEES
+5. Frontend must never read the HttpOnly JWT.
 
-Show a list of all students who did NOT mark attendance.
+6. JWT expiration remains exactly 3 minutes unless there is an existing configuration that must be preserved.
 
-Example:
+7. Existing CR/student authorization.
 
-Absent Students
+8. Existing active-session/rejoin behavior.
 
-1. Rahul Sharma — 2025001001
-2. Priya Singh — 2025001002
-3. Aman Kumar — 2025001003
+9. Only one active attendance session at a time.
 
-The absentee list must be generated by the backend by comparing:
+10. If multiple authorized CRs access the same active session, they must continue/rejoin the same session.
 
-* authoritative student roster from Google Sheet
-  AGAINST
-* students recorded as PRESENT for this session.
+11. Ending the session by one CR ends the shared session for all CRs.
 
-Do NOT calculate the absentee list purely in React.
+12. QR token validation.
 
-B. PRESENT COUNT
+13. QR token expiration.
 
-When scrolling down, show:
+14. CR location capture and attendance radius validation.
 
-Present Students: 42 / 52
+15. Student location validation.
 
-or:
+16. Authoritative Google Sheet roster validation.
 
-Total Present
-42
+17. Verified student enrollment/name association with Firebase UID.
 
-Also show the percentage if useful:
+18. Duplicate attendance prevention.
 
-Attendance: 80.77%
+19. Backend is the source of truth for PRESENT/ABSENT.
 
-The final summary should clearly distinguish:
+20. Frontend must never directly access Firestore.
 
-* Total Students
-* Present
-* Absent
-* Attendance Percentage
+21. Frontend must never directly access Google Sheets.
 
-The absentee list should be scrollable if there are many students.
+22. Existing Firestore security/architecture.
 
-Make sure the final result is based on server-side data after the session has actually ended.
+23. Existing Google Sheets service account architecture.
 
-==================================================
-6. DISABLE "CONTINUE" AFTER FIRST CLICK
-=======================================
+24. Existing CR attendance statistics/jar animation.
 
-Any "Continue" button in the authentication/attendance flow must become disabled immediately when clicked.
+25. Existing absentee final summary.
 
-Purpose:
-Prevent spam clicking and duplicate API requests.
+26. Existing "End Session" behavior.
 
-Behavior:
+27. Existing authentication expiration handling:
+    If the backend says the application JWT is invalid/expired, immediately treat the user as unauthenticated.
+    Do NOT show a misleading "Continue" button.
+    Clear stale frontend state and redirect/re-authenticate.
 
-Before click:
-[ Continue ]
-
-After click:
-[ Processing... ]  ← disabled
-
-The user must not be able to click it again until the operation finishes.
-
-Requirements:
-
-* Disable immediately on first click.
-* Show a loading/processing state.
-* Prevent duplicate API calls.
-* Re-enable only if the operation fails and the user is allowed to retry.
-* If the JWT/session becomes invalid during the operation, do not re-enable Continue as if the session were still valid. Return the user to authentication.
-
-Apply the same protection to other important one-time actions where appropriate, especially:
-
-* Start Session
-* End Session
-* Submit Attendance
-* Confirm student enrollment
-
-Do NOT rely only on frontend button disabling for duplicate prevention. The backend must continue to enforce:
-
-* one active session
-* duplicate attendance prevention
-* valid session
-* valid authentication
+28. Existing button spam prevention:
+    Start Session, End Session, Submit Attendance, Confirm Enrollment, and similar actions should remain disabled immediately after click while the request is being processed.
 
 ==================================================
-7. API / BACKEND DESIGN
-=======================
+IMPLEMENTATION PROCESS
+======================
 
-Before implementing, inspect the existing services and reuse them where possible.
+STEP 1 — INSPECT FIRST
 
-Likely relevant files include:
+Before changing anything:
 
-Backend/app/routers/auth.py
-Backend/app/routers/attendance.py
-Backend/app/services/auth_service.py
-Backend/app/services/attendance_service.py
-Backend/app/services/session_service.py
-Backend/app/services/qr_service.py
-Backend/app/services/student_service.py
-Backend/app/services/sheets_service.py
-Backend/app/middleware/auth.py
-Backend/app/core/security.py
+* Inspect the complete current frontend structure.
+* Inspect the complete current backend structure.
+* Locate the current authentication implementation.
+* Locate session creation/end logic.
+* Locate QR generation/refresh logic.
+* Locate attendance validation.
+* Locate Firestore models/services.
+* Locate Google Sheets service.
+* Locate CR dashboard.
+* Locate student attendance flow.
+* Locate absentee summary.
+* Locate live attendance statistics.
+* Locate the existing floating attendance notification implementation.
 
-Add or modify endpoints only where necessary.
+Identify exactly which files/functions need modification.
 
-Potential backend capabilities needed:
+Do NOT immediately rewrite files.
 
-* Get/rejoin active session after CR authorization
-* Get current session attendance statistics
-* Look up student by last 3 enrollment digits
-* Retrieve verified enrollment associated with Firebase UID
-* Confirm/save verified enrollment
-* Get final attendance summary after session ends
+STEP 2 — CREATE A CHANGE PLAN
 
-Use the existing error-response structure.
+Before implementation, provide a concise plan containing:
 
-Do not expose sensitive information unnecessarily.
+* Backend files to modify.
+* Frontend files to modify.
+* New API endpoints required.
+* Firestore schema changes.
+* Google Sheets changes.
+* Any environment/configuration changes.
+* Any migration/backward compatibility considerations.
+
+STEP 3 — IMPLEMENT INCREMENTALLY
+
+Implement the changes without unnecessarily restructuring the project.
+
+Reuse existing services/components wherever possible.
+
+Do not create duplicate authentication, Google Sheets, Firestore, session, or QR implementations.
+
+STEP 4 — VALIDATE
+
+After implementation, check:
+
+BACKEND:
+
+* Python syntax.
+* Imports.
+* Pydantic models.
+* FastAPI routes.
+* Authentication dependencies.
+* Role authorization.
+* Firestore operations.
+* Google Sheets operations.
+* Session lifecycle.
+* QR expiration.
+* Duplicate attendance.
+* Device/IP audit logic.
+
+FRONTEND:
+
+* React compilation.
+* API requests.
+* Credentials included for cookie authentication.
+* Loading/disabled states.
+* CR UI.
+* Admin UI.
+* Student UI.
+* CSV download.
+* Clipboard copy.
+* QR lifetime controls.
+* Floating notifications.
+
+STEP 5 — SECURITY REVIEW
+
+Before considering the task complete, verify:
+
+* No Firebase Admin credentials are exposed to frontend.
+* No Google service-account credentials are exposed to frontend.
+* No JWT is placed in localStorage/sessionStorage.
+* No JWT is placed inside QR codes.
+* No student can directly modify attendance status.
+* No student can call Admin APIs successfully.
+* No student can call CR-only APIs successfully.
+* Admin-only APIs are backend protected.
+* Google Sheet roster remains authoritative.
+* Session ID remains backend generated.
+* Session name cannot replace Session ID.
+* Device/IP information is captured server-side where possible.
+* Raw IP/device information is not unnecessarily exposed to students.
+* QR lifetime is validated by backend.
+* Existing duplicate attendance protection remains active.
 
 ==================================================
-8. DATA CONSISTENCY / SECURITY
-==============================
+EXPECTED RESULT
+===============
 
-The following rules are mandatory:
+After these changes:
 
-1. Backend is the source of truth for attendance.
-2. Backend is the source of truth for CR/student roles.
-3. Backend is the source of truth for active session state.
-4. Backend is the source of truth for present/absent status.
-5. React must never directly access Google Sheets.
-6. React must never directly access Firestore.
-7. React must never determine whether someone is PRESENT.
-8. React must never determine whether someone is CR.
-9. React must never store the application JWT.
-10. Application JWT remains HttpOnly.
-11. Firebase ID token is only sent to `/authorize-user`.
-12. Student enrollment must be verified against Sheet1 before being associated with a Firebase UID.
-13. Duplicate attendance must remain blocked server-side.
-14. Multiple CRs must operate on the same active session.
-15. Ending a session must invalidate its QR/session attendance ability.
-16. Never trust frontend attendance counts as authoritative.
-17. Never trust frontend student names/enrollment numbers without backend verification.
+CR FLOW:
+
+Google Login
+↓
+Authorize as CR
+↓
+Check for existing active session
+↓
+If active → Rejoin existing session
+If none → Start Session
+↓
+Enter Session Name
+↓
+Backend creates existing Session ID + Session Name
+↓
+Create session-specific Google Sheet
+↓
+Copy Sheet1 roster
+↓
+All students initially ABSENT/red
+↓
+CR displays QR
+↓
+CR can adjust QR lifetime
+↓
+Students scan QR and complete attendance
+↓
+Backend validates identity + session + QR + location + roster
+↓
+Backend records attendance
+↓
+Session Google Sheet changes student to PRESENT/green
+↓
+CR live statistics update
+↓
+Student notification floats from bottom → top-right
+↓
+Potential same-device/IP proxy situations are flagged
+↓
+CR ends session
+↓
+Backend calculates final attendance from authoritative records
+↓
+Absentees sorted by Enrollment Number ascending
+↓
+CR sees absentee list
+↓
+[Download CSV] [Copy Names]
+
+ADMIN FLOW:
+
+Google Login
+↓
+Authorize as Admin
+↓
+Admin Dashboard
+↓
+Add New CR Email
+↓
+Backend validates Admin role
+↓
+Backend updates authoritative Firebase/Firestore admin list
+↓
+That email can subsequently authenticate as CR
+
+STUDENT FLOW:
+
+Google Login
+↓
+Existing verified enrollment association is checked
+↓
+If not associated → ask for last 3 enrollment digits
+↓
+Backend searches authoritative Sheet1
+↓
+If exactly one match → show verified student name
+↓
+Student confirms
+↓
+Backend associates verified enrollment/name with Firebase UID
+↓
+Future attendance does not repeatedly ask for the same information
+
+If multiple students have the same last 3 enrollment digits:
+
+DO NOT automatically select one.
+
+Show an appropriate message and require an unambiguous verification process.
 
 ==================================================
-9. UI/UX
-========
+FINAL REQUIREMENT
+=================
 
-Keep the existing application's design language.
+Keep the implementation production-oriented but simple enough to maintain.
 
-Do not completely redesign the application.
+Do not introduce unnecessary libraries or architectural changes.
 
-Make the new screens responsive for:
+Do not remove existing functionality.
 
-* desktop
-* mobile
+Do not silently change security behavior.
 
-Use clear states:
+If any requested feature conflicts with the existing implementation, STOP and clearly explain the conflict before making a destructive change.
 
-Loading
-Success
-Error
-Expired session
-Session ended
-Attendance already marked
-Student found
-Student not found
-Multiple enrollment matches
-Location required
-Outside attendance radius
+After implementation, provide:
 
-Avoid confusing navigation.
-
-When a session expires or is ended:
-
-* do not leave stale Continue buttons visible
-* do not allow old attendance submission
-* clear stale session state where appropriate.
-
-==================================================
-10. IMPLEMENTATION PROCESS
-==========================
-
-Before modifying code:
-
-1. Inspect the current frontend authentication flow.
-2. Inspect `/authorize-user`.
-3. Inspect current session creation/end logic.
-4. Inspect Firestore session structure.
-5. Inspect current student verification.
-6. Inspect Google Sheets integration.
-7. Inspect current attendance statistics, if any.
-8. Inspect current CR UI.
-9. Inspect current student UI.
-10. Identify exactly which files need modification.
-
-Then implement the changes.
-
-After implementation:
-
-* Check for TypeScript/JavaScript errors.
-* Check for Python syntax/import errors.
-* Check that all existing API routes still work.
-* Check that no Firebase/Google credentials are exposed to the frontend.
-* Check that the application JWT remains HttpOnly.
-* Check that duplicate requests are protected.
-* Check that two CRs cannot create two active sessions.
-* Check that an expired JWT cannot access protected functionality.
-* Check that a student can be associated with only a backend-verified enrollment.
-* Check that the final absentee list is generated from server-side attendance data.
-
-Do not make unrelated changes.
-
-At the end, give me:
-
-1. A list of files changed.
-2. A short explanation of what changed in each file.
-3. Any new API endpoints added.
-4. Any Firestore schema changes.
-5. Any environment variables added/changed.
-6. Any frontend changes.
-7. Any commands I need to run to test/deploy the changes.
-8. Any assumptions you had to make.
+1. Files changed.
+2. New endpoints added.
+3. Firestore changes.
+4. Google Sheets changes.
+5. Frontend changes.
+6. Any required environment/configuration changes.
+7. Any Firebase/Google Cloud console actions required.
+8. Testing steps for CR, Admin, and Student flows.
+9. Any known limitations.

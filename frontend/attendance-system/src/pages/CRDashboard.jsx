@@ -1,6 +1,8 @@
-// CR Dashboard: rejoin the single shared active session (or start one)
-// -> live rotating QR (10s, identical for every CR) -> jar-filling stats
-// polled from the backend -> end session -> server-computed summary.
+// CR Dashboard: rejoin the single shared active session (or start one with
+// a session NAME) -> live rotating QR (CR-adjustable lifetime, identical for
+// every CR) -> water-fill stats polled from the backend (plus same-device/IP
+// proxy warnings) -> end session -> server-computed summary with the
+// absentee list sorted by enrollment, CSV download and clipboard copy.
 // The QR only carries a random short-lived token URL — never JWTs,
 // ID tokens or personal data. All validity decisions are made by FastAPI.
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -13,6 +15,28 @@ import { getCurrentLocation } from "../utils/geolocation";
 const REFRESH_SECONDS_FALLBACK = 10;
 const STATS_POLL_MS = 5000; // reasonable interval — no hammering
 const POPUP_LIFETIME_MS = 4200;
+// Mirrors the backend allow-list (settings.QR_ALLOWED_LIFETIME_SECONDS) —
+// the server validates every value again, this only shapes the dropdown.
+const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
+
+// Absentee CSV (backend-verified data). Quoted fields + BOM so enrollment
+// numbers with leading zeros open correctly in Excel.
+function downloadAbsenteeCSV(summary) {
+  const rows = [["Enrollment Number", "Student Name"]];
+  for (const a of summary.absentees || []) rows.push([a.enrollment_no, a.name]);
+  const csv =
+    "\ufeff" +
+    rows
+      .map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `absentees-${summary.session_id}.csv`;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
 export default function CRDashboard() {
   const { profile, logout } = useAuth();
@@ -26,6 +50,11 @@ export default function CRDashboard() {
   const [startProgress, setStartProgress] = useState(0);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false); // disables Start/End after first click
+  const [sessionName, setSessionName] = useState(""); // CR-entered, required
+  const [qrLifetime, setQrLifetime] = useState(REFRESH_SECONDS_FALLBACK);
+  const [lifetimeSaving, setLifetimeSaving] = useState(false);
+  const [lifetimeNotice, setLifetimeNotice] = useState(null);
+  const [copied, setCopied] = useState(false); // "Copied!" on the absentee list
   const timerRef = useRef(null);
   const tickRef = useRef(0);
   const statsRef = useRef(null);
@@ -151,7 +180,12 @@ export default function CRDashboard() {
         const data = await api.getActiveSession();
         if (cancelled) return;
         if (data.session && data.qr) {
-          setSession({ session_id: data.session.session_id, qr: data.qr });
+          setSession({
+            session_id: data.session.session_id,
+            session_name: data.session.session_name || "",
+            qr: data.qr,
+          });
+          setQrLifetime(data.session.qr_lifetime_seconds || REFRESH_SECONDS_FALLBACK);
           if (data.stats) setStats(data.stats);
           setStage("active");
           startClock(
@@ -178,6 +212,11 @@ export default function CRDashboard() {
 
   const handleStart = async () => {
     if (busyRef.current) return; // first click wins — no duplicate requests
+    const name = sessionName.trim();
+    if (!name) {
+      setError("Please enter a session name before starting.");
+      return;
+    }
     busyRef.current = true;
     setBusy(true);
     setError(null);
@@ -188,11 +227,15 @@ export default function CRDashboard() {
       250
     );
     try {
-      // Fresh browser location for the session anchor point.
+      // Fresh browser location for the session anchor point. The session
+      // NAME rides along but the backend still mints the session_id.
       const location = await getCurrentLocation();
-      const data = await api.startAttendance(location.latitude, location.longitude);
+      const data = await api.startAttendance(location.latitude, location.longitude, name);
       seenRef.current = new Set();
       setSession(data);
+      setQrLifetime(data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK);
+      setSessionName("");
+      setSummary(null);
       setStage("active");
       startClock(
         data.session_id,
@@ -207,6 +250,28 @@ export default function CRDashboard() {
       setStartProgress(100);
       busyRef.current = false;
       setBusy(false);
+    }
+  };
+
+  // CR changes how long FUTURE QR tokens live. The backend validates the
+  // value against its allow-list and applies it from the next rotation on.
+  const handleLifetimeChange = async (seconds) => {
+    if (!session?.session_id || lifetimeSaving) return;
+    setLifetimeSaving(true);
+    setLifetimeNotice(null);
+    const previous = qrLifetime;
+    setQrLifetime(seconds);
+    try {
+      const data = await api.setQRLifetime(session.session_id, seconds);
+      setQrLifetime(data.qr_lifetime_seconds);
+      setLifetimeNotice(
+        `QR now valid for ${data.qr_lifetime_seconds}s — from the next refresh.`
+      );
+    } catch (err) {
+      setQrLifetime(previous);
+      setError(err.message);
+    } finally {
+      setLifetimeSaving(false);
     }
   };
 
@@ -261,22 +326,54 @@ export default function CRDashboard() {
     );
   };
 
+  // Backend-computed proxy-attendance flags (never raw IPs, never student data).
+  const renderWarnings = () => {
+    const warnings = stats?.warnings || [];
+    if (warnings.length === 0) return null;
+    return (
+      <div className="session-warnings" role="alert">
+        {warnings.map((w) => (
+          <p key={w}>{w}</p>
+        ))}
+      </div>
+    );
+  };
+
   const renderPopups = () => (
-    /* Floating "student present" notifications (backend-sourced). */
+    /* "Student present" floats: rise from the BOTTOM of the viewport toward
+       the top-right (backend-sourced; pointer-events none so they never
+       block CR controls). Staggered delays keep simultaneous arrivals from
+       completely overlapping. */
     <div className="popup-layer" aria-live="polite">
-      {popups.map((popup) => (
-        <div key={popup.id} className="present-popup">
+      {popups.map((popup, index) => (
+        <div
+          key={popup.id}
+          className="present-popup"
+          style={{ animationDelay: `${index * 0.18}s` }}
+        >
           {popup.name} ✓
         </div>
       ))}
     </div>
   );
 
+  const copyAbsenteeNames = async () => {
+    const names = (summary?.absentees || []).map((a) => a.name).join("\n");
+    try {
+      await navigator.clipboard.writeText(names);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Could not copy to the clipboard on this device.");
+    }
+  };
+
   const renderSummary = () => {
     if (!summary) return null;
     return (
       <div className="summary-block">
         <h2>Attendance Session Ended</h2>
+        {summary.session_name && <p className="summary-name">{summary.session_name}</p>}
         <div className="summary-grid">
           <div className="summary-stat">
             <span className="summary-stat-value">{summary.total_students}</span>
@@ -297,16 +394,45 @@ export default function CRDashboard() {
         </div>
 
         <h3 className="absentee-heading">Absent Students</h3>
-        <ol className="absentee-list">
-          {summary.absentees.length === 0 && (
-            <li className="absentee-empty">No absentees — everyone marked present.</li>
-          )}
-          {summary.absentees.map((student) => (
-            <li key={student.enrollment_no}>
-              {student.name} — {student.enrollment_no}
-            </li>
-          ))}
-        </ol>
+        {/* Sorted ASCENDING by enrollment number (backend order preserved). */}
+        <table className="absentee-table">
+          <thead>
+            <tr>
+              <th>Enrollment No</th>
+              <th>Name</th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.absentees.length === 0 && (
+              <tr>
+                <td colSpan={2} className="absentee-empty">
+                  No absentees — everyone marked present.
+                </td>
+              </tr>
+            )}
+            {summary.absentees.map((student) => (
+              <tr key={student.enrollment_no}>
+                <td className="absentee-enr">{student.enrollment_no}</td>
+                <td>{student.name}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {(summary.absentees?.length ?? 0) > 0 && (
+          <div className="summary-actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-small"
+              onClick={() => downloadAbsenteeCSV(summary)}
+            >
+              Download CSV
+            </button>
+            <button type="button" className="btn btn-ghost btn-small" onClick={copyAbsenteeNames}>
+              {copied ? "Copied!" : "Copy Names"}
+            </button>
+          </div>
+        )}
 
         <p className="summary-foot">
           Present Students: {summary.present_count} / {summary.total_students}
@@ -314,6 +440,35 @@ export default function CRDashboard() {
       </div>
     );
   };
+
+  // Small start form: the CR names the session (backend still generates
+  // the authoritative session_id — the name is a human label only).
+  const renderStartForm = (label) => (
+    <form
+      className="start-form"
+      onSubmit={(e) => {
+        e.preventDefault();
+        handleStart();
+      }}
+    >
+      <label className="start-form-label" htmlFor="session-name-input">
+        Session Name
+      </label>
+      <input
+        id="session-name-input"
+        className="input"
+        type="text"
+        maxLength={80}
+        placeholder="e.g. MCA Gen-AI - Morning Attendance"
+        value={sessionName}
+        onChange={(e) => setSessionName(e.target.value)}
+        disabled={busy}
+      />
+      <button type="submit" className="btn btn-primary btn-large" disabled={busy}>
+        {label}
+      </button>
+    </form>
+  );
 
   const sessionLive = stage === "active" || stage === "ending";
 
@@ -337,15 +492,7 @@ export default function CRDashboard() {
 
           {stage === "loading" && <ProgressBar percent={40} />}
 
-          {stage === "idle" && (
-            <button
-              className="btn btn-primary btn-large"
-              onClick={handleStart}
-              disabled={busy}
-            >
-              Start Session Attendance
-            </button>
-          )}
+          {stage === "idle" && renderStartForm("Start Session Attendance")}
 
           {stage === "starting" && (
             <div className="starting-block">
@@ -357,11 +504,34 @@ export default function CRDashboard() {
           {sessionLive && session?.qr && (
             <div className="qr-block">
               <h2 className="session-active-label">Attendance Session Active</h2>
+              {(stats?.session_name || session.session_name) && (
+                <p className="session-name">{stats?.session_name || session.session_name}</p>
+              )}
               <div className="qr-frame">
                 <QRCodeCanvas value={session.qr.qr_url} size={224} marginSize={2} />
               </div>
               {renderLiveStats()}
+              {renderWarnings()}
               <p className="session-status">Session Status: Active</p>
+              <div className="qr-lifetime-control">
+                <label className="qr-lifetime-label" htmlFor="qr-lifetime-select">
+                  QR Valid For
+                </label>
+                <select
+                  id="qr-lifetime-select"
+                  className="qr-lifetime-select"
+                  value={qrLifetime}
+                  onChange={(e) => handleLifetimeChange(Number(e.target.value))}
+                  disabled={lifetimeSaving}
+                >
+                  {QR_LIFETIME_OPTIONS.map((seconds) => (
+                    <option key={seconds} value={seconds}>
+                      {seconds} seconds
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {lifetimeNotice && <p className="qr-lifetime-notice">{lifetimeNotice}</p>}
               <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
               <p className="session-id muted">Session ID: {session.session_id}</p>
               <button
@@ -377,13 +547,7 @@ export default function CRDashboard() {
           {stage === "ended" && (
             <div className="ended-block">
               {renderSummary()}
-              <button
-                className="btn btn-primary btn-large"
-                onClick={handleStart}
-                disabled={busy}
-              >
-                Start New Session
-              </button>
+              {renderStartForm("Start New Session")}
             </div>
           )}
 

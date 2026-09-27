@@ -70,11 +70,24 @@ export const getMe = () => request("/me");
 // ---- CR session ---------------------------------------------------------
 export const getActiveSession = () => request("/active-session");
 
-export const startAttendance = (latitude, longitude) =>
-  request("/start-attendance", { method: "POST", body: { latitude, longitude } });
+// session_name is required by the backend (human label only; the session_id
+// stays backend-generated). Latitude/longitude captured from the CR device.
+export const startAttendance = (latitude, longitude, sessionName) =>
+  request("/start-attendance", {
+    method: "POST",
+    body: { latitude, longitude, session_name: sessionName },
+  });
 
 export const refreshQR = (sessionId) =>
   request("/qr/refresh", { method: "POST", body: { session_id: sessionId } });
+
+// CR requests a NEW lifetime for future QR rotations; the backend validates
+// it against an allow-list (the frontend never decides QR validity).
+export const setQRLifetime = (sessionId, lifetimeSeconds) =>
+  request("/qr/lifetime", {
+    method: "POST",
+    body: { session_id: sessionId, lifetime_seconds: lifetimeSeconds },
+  });
 
 export const endAttendance = (sessionId) =>
   request("/end-attendance", { method: "POST", body: { session_id: sessionId } });
@@ -111,5 +124,13 @@ export const checkAttendance = ({ sessionToken, latitude, longitude }) =>
       longitude,
     },
   });
+
+// ---- Admin --------------------------------------------------------------
+// Protected FastAPI endpoints. A student/CR calling these is rejected 403 by
+// the backend (role comes from the signed JWT) regardless of the UI.
+export const listCRs = () => request("/admin/cr");
+
+export const addCR = (email) =>
+  request("/admin/cr", { method: "POST", body: { email } });
 
 export default request;
