@@ -7,8 +7,9 @@ import {
   completeRedirectSignIn,
   getFirebaseIdToken,
   observeAuthUser,
-  signInWithGoogle,
   signOutUser,
+  startGoogleSignIn,
+  takeAttendanceReturnUrl,
 } from "../services/auth";
 
 const AuthContext = createContext(null);
@@ -68,6 +69,16 @@ export function AuthProvider({ children }) {
     return () => api.setAuthRecovery(null, null);
   }, [authorize]);
 
+  // Redirect sign-in returns to the app ROOT — if the student parked an
+  // attendance link (QR token) before leaving, go straight back to it
+  // instead of stranding them on / and starting a continue→login loop.
+  useEffect(() => {
+    const returnUrl = takeAttendanceReturnUrl();
+    if (returnUrl && window.location.pathname === "/") {
+      window.location.assign(returnUrl);
+    }
+  }, []);
+
   // Bootstrap: restore an existing Firebase session and re-authorize. Also
   // consume any pending redirect-sign-in result (Google login returns via
   // full-page redirect, so the app reloads right after the account picker).
@@ -99,7 +110,7 @@ export function AuthProvider({ children }) {
   const login = useCallback(async () => {
     setError(null);
     try {
-      await signInWithGoogle();
+      await startGoogleSignIn();
     } catch (err) {
       const message =
         err?.code === "auth/popup-closed-by-user"
