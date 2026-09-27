@@ -233,40 +233,44 @@ export default function CRDashboard() {
     }
   };
 
-  const renderJar = () => {
+  // Screen-filling water: the whole viewport rises like water based on the
+  // backend-computed attendance percentage (fixed layer behind the card).
+  const renderWater = () => {
     if (!stats) return null;
     const percent = Math.max(0, Math.min(100, stats.percentage ?? 0));
     return (
-      <div className="jar-section">
-        <div className="jar-wrap" aria-hidden="true">
-          <div className="jar-lid" />
-          <div className="jar-neck" />
-          <div className="jar-body">
-            <div className="jar-fill" style={{ height: `${percent}%` }}>
-              <div className="jar-surface" />
-            </div>
-            <div className="jar-label">
-              {stats.present_count} / {stats.total_students}
-            </div>
-          </div>
-        </div>
-        <div className="jar-stats">
-          <p className="jar-count">
-            {stats.present_count} / {stats.total_students} Present
-          </p>
-          <p className="jar-percent">{percent.toFixed(1)}%</p>
-        </div>
-        {/* Floating "student present" notifications (backend-sourced). */}
-        <div className="popup-layer" aria-live="polite">
-          {popups.map((popup) => (
-            <div key={popup.id} className="present-popup">
-              {popup.name} ✓
-            </div>
-          ))}
+      <div className="water-bg" aria-hidden="true">
+        <div className="water" style={{ height: `${percent}%` }}>
+          <div className="water-wave wave-a" />
+          <div className="water-wave wave-b" />
         </div>
       </div>
     );
   };
+
+  const renderLiveStats = () => {
+    if (!stats) return null;
+    const percent = Math.max(0, Math.min(100, stats.percentage ?? 0));
+    return (
+      <div className="live-stats">
+        <span className="live-count">
+          {stats.present_count} / {stats.total_students} Present
+        </span>
+        <span className="live-percent">{percent.toFixed(1)}%</span>
+      </div>
+    );
+  };
+
+  const renderPopups = () => (
+    /* Floating "student present" notifications (backend-sourced). */
+    <div className="popup-layer" aria-live="polite">
+      {popups.map((popup) => (
+        <div key={popup.id} className="present-popup">
+          {popup.name} ✓
+        </div>
+      ))}
+    </div>
+  );
 
   const renderSummary = () => {
     if (!summary) return null;
@@ -311,79 +315,81 @@ export default function CRDashboard() {
     );
   };
 
+  const sessionLive = stage === "active" || stage === "ending";
+
   return (
-    <div className="page-center">
-      <div className="card cr-card">
-        <header className="cr-header">
-          <div>
-            <h1 className="app-title">Student Attendance System</h1>
-            <p className="app-subtitle">
-              Welcome, {profile?.name || profile?.email || "CR"}
-            </p>
-          </div>
-          <button className="btn btn-ghost" onClick={logout}>
-            Sign out
-          </button>
-        </header>
-
-        {stage === "loading" && <ProgressBar percent={40} />}
-
-        {stage === "idle" && (
-          <button
-            className="btn btn-primary btn-large"
-            onClick={handleStart}
-            disabled={busy}
-          >
-            Start Session Attendance
-          </button>
-        )}
-
-        {stage === "starting" && (
-          <div className="starting-block">
-            <p>Starting Attendance Session…</p>
-            <ProgressBar percent={startProgress} />
-          </div>
-        )}
-
-        {(stage === "active" || stage === "ending") && session?.qr && (
-          <div className="qr-block">
-            <h2 className="session-active-label">Attendance Session Active</h2>
-            <div className="active-split">
-              <div className="qr-side">
-                <div className="qr-frame">
-                  <QRCodeCanvas value={session.qr.qr_url} size={224} marginSize={2} />
-                </div>
-                <p className="session-status">Session Status: Active</p>
-                <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
-                <p className="session-id muted">Session ID: {session.session_id}</p>
-              </div>
-              <div className="jar-side">{renderJar()}</div>
+    <>
+      {sessionLive && renderWater()}
+      {sessionLive && renderPopups()}
+      <div className="page-center">
+        <div className="card cr-card">
+          <header className="cr-header">
+            <div>
+              <h1 className="app-title">Student Attendance System</h1>
+              <p className="app-subtitle">
+                Welcome, {profile?.name || profile?.email || "CR"}
+              </p>
             </div>
-            <button
-              className="btn btn-danger btn-large"
-              onClick={handleEnd}
-              disabled={stage === "ending" || busy}
-            >
-              {stage === "ending" ? "Processing…" : "End Session"}
+            <button className="btn btn-ghost" onClick={logout}>
+              Sign out
             </button>
-          </div>
-        )}
+          </header>
 
-        {stage === "ended" && (
-          <div className="ended-block">
-            {renderSummary()}
+          {stage === "loading" && <ProgressBar percent={40} />}
+
+          {stage === "idle" && (
             <button
               className="btn btn-primary btn-large"
               onClick={handleStart}
               disabled={busy}
             >
-              Start New Session
+              Start Session Attendance
             </button>
-          </div>
-        )}
+          )}
 
-        <ErrorBox message={error} />
+          {stage === "starting" && (
+            <div className="starting-block">
+              <p>Starting Attendance Session…</p>
+              <ProgressBar percent={startProgress} />
+            </div>
+          )}
+
+          {sessionLive && session?.qr && (
+            <div className="qr-block">
+              <h2 className="session-active-label">Attendance Session Active</h2>
+              <div className="qr-frame">
+                <QRCodeCanvas value={session.qr.qr_url} size={224} marginSize={2} />
+              </div>
+              {renderLiveStats()}
+              <p className="session-status">Session Status: Active</p>
+              <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
+              <p className="session-id muted">Session ID: {session.session_id}</p>
+              <button
+                className="btn btn-danger btn-large"
+                onClick={handleEnd}
+                disabled={stage === "ending" || busy}
+              >
+                {stage === "ending" ? "Processing…" : "End Session"}
+              </button>
+            </div>
+          )}
+
+          {stage === "ended" && (
+            <div className="ended-block">
+              {renderSummary()}
+              <button
+                className="btn btn-primary btn-large"
+                onClick={handleStart}
+                disabled={busy}
+              >
+                Start New Session
+              </button>
+            </div>
+          )}
+
+          <ErrorBox message={error} />
+        </div>
       </div>
-    </div>
+    </>
   );
 }

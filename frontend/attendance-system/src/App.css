@@ -410,114 +410,66 @@ form input:focus {
   }
 }
 
-/* ---- CR live session: QR + jar side by side ------------------------------ */
-.active-split {
-  display: flex;
-  gap: 24px;
-  align-items: flex-start;
-  justify-content: center;
-  flex-wrap: wrap;
-}
-
-.qr-side,
-.jar-side {
-  flex: 1 1 240px;
-  min-width: 240px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-/* ---- Jar-filling attendance animation ------------------------------------ */
-.jar-section {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-}
-
-.jar-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-
-.jar-lid {
-  width: 92px;
-  height: 12px;
-  background: linear-gradient(180deg, #64748b, #475569);
-  border-radius: 6px 6px 2px 2px;
-}
-
-.jar-neck {
-  width: 70px;
-  height: 8px;
-  background: #cbd5e1;
-}
-
-.jar-body {
-  position: relative;
-  width: 128px;
-  height: 168px;
-  border: 4px solid #94a3b8;
-  border-top-width: 3px;
-  border-radius: 10px 10px 22px 22px;
-  background: rgba(226, 232, 240, 0.35);
-  overflow: hidden;
-}
-
-.jar-fill {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  min-height: 0;
-  background: linear-gradient(180deg, var(--primary), #16a34a);
-  opacity: 0.85;
-  transition: height 0.9s ease;
-}
-
-.jar-surface {
-  position: absolute;
-  top: -4px;
-  left: 0;
-  right: 0;
-  height: 8px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.45);
-  animation: jar-wave 2.4s ease-in-out infinite;
-}
-
-@keyframes jar-wave {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(2px); }
-}
-
-.jar-label {
-  position: absolute;
+/* ---- CR live session: screen-filling water + stats ----------------------- */
+.water-bg {
+  position: fixed;
   inset: 0;
+  overflow: hidden;
+  pointer-events: none; /* visual only — never blocks controls */
+  z-index: 0;
+}
+
+.water {
+  position: absolute;
+  left: -4px;
+  right: -4px;
+  bottom: -4px;
+  min-height: 0;
+  background: linear-gradient(
+    180deg,
+    rgba(56, 189, 248, 0.55),
+    rgba(2, 132, 199, 0.72) 35%,
+    rgba(14, 116, 144, 0.8)
+  );
+  transition: height 1.4s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Two oversized rotating "blobs" create a rolling wave at the surface. */
+.water-wave {
+  position: absolute;
+  top: -18px;
+  left: -60%;
+  width: 220%;
+  height: 36px;
+  border-radius: 43% 47% 44% 46%;
+  background: rgba(125, 211, 252, 0.55);
+  animation: water-roll 9s linear infinite;
+}
+
+.water-wave.wave-b {
+  top: -12px;
+  background: rgba(224, 242, 254, 0.35);
+  animation: water-roll 14s linear infinite reverse;
+}
+
+@keyframes water-roll {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.live-stats {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: center;
-  font-weight: 700;
-  font-size: 1.15rem;
-  color: #0f172a;
-  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.7);
+  gap: 14px;
+  margin: 4px 0 10px;
 }
 
-.jar-stats {
-  text-align: center;
-}
-
-.jar-count {
-  margin: 0;
+.live-count {
   font-weight: 600;
 }
 
-.jar-percent {
-  margin: 0;
+.live-percent {
   font-size: 1.6rem;
   font-weight: 800;
   color: var(--primary);
@@ -525,16 +477,15 @@ form input:focus {
 
 /* ---- "Student present" floating popups ------------------------------------ */
 .popup-layer {
-  position: absolute;
-  left: 50%;
-  bottom: 100%;
-  transform: translateX(-50%);
+  position: fixed;
+  top: 16px;
+  right: 16px;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   gap: 6px;
   pointer-events: none; /* never block the CR's controls */
-  z-index: 5;
+  z-index: 20;
 }
 
 .present-popup {
@@ -555,6 +506,12 @@ form input:focus {
   12% { opacity: 1; transform: translateY(0); }
   75% { opacity: 1; }
   100% { opacity: 0; transform: translateY(-46px); }
+}
+
+/* The dashboard card must float above the water layer. */
+.page-center {
+  position: relative;
+  z-index: 1;
 }
 
 /* ---- Student found / enrollment confirm ---------------------------------- */
@@ -668,10 +625,9 @@ form input:focus {
 
 /* ---- Responsive ----------------------------------------------------------- */
 @media (max-width: 480px) {
-  .qr-side,
-  .jar-side {
-    min-width: 0;
-    flex-basis: 100%;
+  .popup-layer {
+    top: 10px;
+    right: 10px;
   }
 
   .card {

@@ -17,8 +17,6 @@ absentee summary — both computed strictly from server-side data.
 import logging
 from datetime import datetime, timezone
 
-from google.cloud.firestore import Query
-
 from app.core.config import settings
 from app.core.firebase import COLLECTION_ATTENDANCE, COLLECTION_SESSIONS, get_db
 from app.services import qr_service, sheets_service, student_service
@@ -143,23 +141,18 @@ def get_session_stats(session_id: str) -> dict:
     total = student_service.roster_size()
 
     attendance = get_db().collection(COLLECTION_ATTENDANCE)
+    # Single equality query — no Firestore orderBy: an equality + order_by
+    # query requires a composite index. A class-size result set is trivial
+    # to sort in memory, which keeps deployment index-free.
     present_docs = list(attendance.where("session_id", "==", session_id).stream())
     present_count = len(present_docs)
 
-    recent = []
-    if present_docs:
-        recent_docs = (
-            attendance.where("session_id", "==", session_id)
-            .order_by("marked_at", direction=Query.DESCENDING)
-            .limit(10)
-            .stream()
-        )
-        for doc in recent_docs:
-            data = doc.to_dict() or {}
-            recent.append({
-                "name": data.get("name", ""),
-                "marked_at": str(data.get("marked_at", "")),
-            })
+    entries = [doc.to_dict() or {} for doc in present_docs]
+    entries.sort(key=lambda d: str(d.get("marked_at", "")), reverse=True)
+    recent = [
+        {"name": d.get("name", ""), "marked_at": str(d.get("marked_at", ""))}
+        for d in entries[:10]
+    ]
 
     percentage = round((present_count / total) * 100, 2) if total else 0.0
     return {
