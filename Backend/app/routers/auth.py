@@ -25,7 +25,14 @@ def _bearer_token(request: Request) -> str:
 @router.post("/authorize-user", response_model=AuthorizeResponse)
 def authorize_user(request: Request, response: Response) -> AuthorizeResponse:
     """Verify the Firebase ID token, decide the role server-side, and issue
-    the 3-minute application JWT in an HttpOnly cookie."""
+    the 3-minute application JWT.
+
+    The JWT is delivered BOTH as an HttpOnly cookie (same-site/desktop
+    fallback) and in the response body (for the 'Authorization: Bearer'
+    header). Cross-site production requests cannot rely on the cookie because
+    browsers block third-party cookies, so the header is the primary transport
+    for the React app served from Firebase Hosting against this Render API.
+    """
     identity = auth_service.verify_firebase_id_token(_bearer_token(request))
     role = auth_service.determine_role(identity["email"])
     auth_service.upsert_user(identity["uid"], identity["name"], identity["email"], role)
@@ -37,7 +44,7 @@ def authorize_user(request: Request, response: Response) -> AuthorizeResponse:
     user = AuthorizedUser(
         uid=identity["uid"], name=identity["name"], email=identity["email"], role=role
     )
-    return AuthorizeResponse(success=True, user=user)
+    return AuthorizeResponse(success=True, user=user, application_token=token)
 
 
 @router.post("/logout")

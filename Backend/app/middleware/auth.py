@@ -21,9 +21,29 @@ class CurrentUser:
     email: str = ""
 
 
-def get_current_user(request: Request) -> CurrentUser:
-    """Verify the application JWT from the HttpOnly cookie."""
+def _application_token(request: Request) -> str | None:
+    """Read the application JWT from the HttpOnly cookie, falling back to the
+    'Authorization: Bearer' header.
+
+    The header transport is what makes protected calls work cross-site in
+    production (React on Firebase Hosting vs. FastAPI on Render), where the
+    browser refuses to store/send the third-party cookie. The Bearer value
+    here is the application JWT — NOT the Firebase ID token, which is only
+    ever sent to /authorize-user and handled by a separate dependency.
+    """
     token = request.cookies.get(settings.AUTH_COOKIE_NAME)
+    if token:
+        return token
+    header = request.headers.get("Authorization", "")
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() == "bearer" and value.strip():
+        return value.strip()
+    return None
+
+
+def get_current_user(request: Request) -> CurrentUser:
+    """Verify the application JWT from the HttpOnly cookie or Bearer header."""
+    token = _application_token(request)
     if not token:
         raise UnauthorizedError("You are not signed in. Please sign in again.")
     try:

@@ -1,7 +1,14 @@
 // Centralized FastAPI client. Every network call in the app goes through here.
-// The application JWT lives in an HttpOnly cookie, so all requests are made
-// with credentials: "include" and the frontend never reads the token itself.
+// The application JWT is kept IN MEMORY and sent as an 'Authorization: Bearer'
+// header on every protected request. The frontend (Firebase Hosting) and the
+// backend (Render) are different sites in production, where browsers block the
+// third-party HttpOnly cookie — the header is the reliable transport. The
+// cookie is still set by the backend as a same-site/desktop fallback, so all
+// requests keep sending credentials: "include".
 const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
+
+// Held only in memory (never localStorage) — refreshed on every /authorize-user.
+let applicationJwt = null;
 
 // Set by AuthContext: async () => refetch /authorize-user with a fresh
 // Firebase ID token. Used to transparently recover when the 3-minute
@@ -20,6 +27,8 @@ async function request(path, { method = "GET", body, firebaseIdToken } = {}, isR
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (firebaseIdToken) headers.Authorization = `Bearer ${firebaseIdToken}`;
+  else if (applicationJwt && path !== "/authorize-user")
+    headers.Authorization = `Bearer ${applicationJwt}`;
 
   let response;
   try {
@@ -61,10 +70,21 @@ async function request(path, { method = "GET", body, firebaseIdToken } = {}, isR
 }
 
 // ---- Auth ---------------------------------------------------------------
-export const authorizeUser = (firebaseIdToken) =>
-  request("/authorize-user", { method: "POST", firebaseIdToken });
+export const authorizeUser = async (firebaseIdToken) => {
+  const data = await request("/authorize-user", { method: "POST", firebaseIdToken });
+  // Capture the bearer token so every subsequent protected call authenticates
+  // via header even when the cross-site cookie is blocked.
+  if (data?.application_token) applicationJwt = data.application_token;
+  return data;
+};
 
-export const logout = () => request("/logout", { method: "POST" });
+export const logout = async () => {
+  try {
+    return await request("/logout", { method: "POST" });
+  } finally {
+    applicationJwt = null;
+  }
+};
 export const getMe = () => request("/me");
 
 // ---- CR session ---------------------------------------------------------
