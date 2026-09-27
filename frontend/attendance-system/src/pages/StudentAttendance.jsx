@@ -82,10 +82,14 @@ export default function StudentAttendance() {
     setBusy(true);
     setSubmitError(null);
     try {
-      // Not signed in yet: start the Google redirect and STOP — this page
-      // reloads after sign-in (the QR link is restored) and the student
-      // taps Continue again from a signed-in, authorized state.
-      if (!firebaseUser) {
+      // undefined = Firebase is STILL restoring the session right after the
+      // redirect reload. Firing login() here re-opens the Google chooser and
+      // loops forever. Only a confirmed null (genuinely signed out) may sign in.
+      if (firebaseUser === undefined) {
+        setSubmitError("Finishing sign-in\u2026 please tap Continue again in a moment.");
+        return;
+      }
+      if (firebaseUser === null) {
         await login();
         return;
       }
@@ -206,7 +210,8 @@ export default function StudentAttendance() {
   if (stage === "found") {
     // Session expired with no Firebase session left to re-authorize from:
     // offer a fresh sign-in only — never a Continue against the old session.
-    const signedOut = requiresReauth && !firebaseUser;
+    const authLoading = firebaseUser === undefined; // restoring session after redirect
+    const signedOut = requiresReauth && firebaseUser === null;
     return (
       <StudentCard>
         <h1 className="app-title">Student Attendance</h1>
@@ -223,13 +228,15 @@ export default function StudentAttendance() {
         <button
           className="btn btn-primary btn-large"
           onClick={signedOut ? () => login().catch(() => {}) : handleContinue}
-          disabled={busy}
+          disabled={busy || authLoading}
         >
-          {busy
-            ? "Processing…"
-            : signedOut
-              ? "Sign in again"
-              : "Continue"}
+          {authLoading
+            ? "Checking sign-in…"
+            : busy
+              ? "Processing…"
+              : signedOut
+                ? "Sign in again"
+                : "Continue"}
         </button>
         {locationWarning && <p className="warning-text">{locationWarning}</p>}
         <ErrorBox message={signedOut ? null : errorText || authError} />
