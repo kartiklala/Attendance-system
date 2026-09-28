@@ -290,24 +290,71 @@ export default function CRDashboard() {
   };
 
   // CR changes how long FUTURE QR tokens live. The backend validates the
-  // value against its allow-list and applies it from the next rotation on.
+  // value against its allow-list. We then force-rotate immediately so the new
+  // policy (especially Permanent) takes effect on the screen right away,
+  // invalidating the previous QR.
   const handleLifetimeChange = async (seconds) => {
     if (!session?.session_id || lifetimeSaving) return;
     setLifetimeSaving(true);
     setLifetimeNotice(null);
     const previous = qrLifetime;
     setQrLifetime(seconds);
+    const sessionId = session.session_id;
     try {
-      const data = await api.setQRLifetime(session.session_id, seconds);
-      setQrLifetime(data.qr_lifetime_seconds);
-      setLifetimeNotice(
-        `QR now valid for ${data.qr_lifetime_seconds}s — from the next refresh.`
-      );
+      const applied = await api.setQRLifetime(sessionId, seconds);
+      const permanent = applied.qr_lifetime_seconds === QR_LIFETIME_PERMANENT;
+      setQrLifetime(applied.qr_lifetime_seconds);
+      // Mint a token under the new policy now (invalidates the old QR).
+      const rotated = await api.rotateQR(sessionId);
+      setSession((current) => (current ? { ...current, qr: rotated.qr } : current));
+      if (permanent || isPermanentQr(rotated.qr)) {
+        stopRotationClock();
+        setCountdown(0);
+        setLifetimeNotice(
+          "QR is now Permanent — it stays valid until you refresh it manually."
+        );
+      } else {
+        startClock(
+          sessionId,
+          rotated.qr.countdown_seconds ||
+            rotated.qr.expires_in_seconds ||
+            REFRESH_SECONDS_FALLBACK
+        );
+        setLifetimeNotice(`QR now valid for ${applied.qr_lifetime_seconds}s.`);
+      }
     } catch (err) {
       setQrLifetime(previous);
       setError(err.message);
     } finally {
       setLifetimeSaving(false);
+    }
+  };
+
+  // CR presses the refresh icon (Permanent mode): issue a brand-new QR and
+  // invalidate the one currently on screen.
+  const handleManualRefresh = async () => {
+    if (!session?.session_id || qrRefreshing) return;
+    setQrRefreshing(true);
+    setLifetimeNotice(null);
+    try {
+      const data = await api.rotateQR(session.session_id);
+      setSession((current) => (current ? { ...current, qr: data.qr } : current));
+      if (isPermanentQr(data.qr)) {
+        stopRotationClock();
+        setCountdown(0);
+      } else {
+        startClock(
+          session.session_id,
+          data.qr.countdown_seconds ||
+            data.qr.expires_in_seconds ||
+            REFRESH_SECONDS_FALLBACK
+        );
+      }
+      setLifetimeNotice("QR refreshed — the previous code no longer works.");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setQrRefreshing(false);
     }
   };
 
@@ -530,6 +577,10 @@ export default function CRDashboard() {
   );
 
   const sessionLive = stage === "active" || stage === "ending";
+  // Permanent QR: never auto-rotates, so the CR gets a manual refresh icon.
+  const qrPermanent =
+    sessionLive && !!session?.qr &&
+    (isPermanentQr(session.qr) || qrLifetime === QR_LIFETIME_PERMANENT);
 
   return (
     <>
@@ -583,6 +634,7 @@ export default function CRDashboard() {
                   onChange={(e) => handleLifetimeChange(Number(e.target.value))}
                   disabled={lifetimeSaving}
                 >
+                  <option value={QR_LIFETIME_PERMANENT}>Permanent</option>
                   {QR_LIFETIME_OPTIONS.map((seconds) => (
                     <option key={seconds} value={seconds}>
                       {seconds} seconds
@@ -591,7 +643,31 @@ export default function CRDashboard() {
                 </select>
               </div>
               {lifetimeNotice && <p className="qr-lifetime-notice">{lifetimeNotice}</p>}
-              <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
+              {qrPermanent ? (
+                <div className="qr-permanent-row">
+                  <p className="qr-countdown qr-countdown-permanent">
+                    QR is Permanent — it stays valid until you refresh it.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-ghost qr-refresh-btn"
+                    onClick={handleManualRefresh}
+                    disabled={qrRefreshing || lifetimeSaving}
+                    title="Refresh the QR and invalidate the previous code"
+                    aria-label="Refresh QR code"
+                  >
+                    <span
+                      className={qrRefreshing ? "qr-refresh-icon spinning" : "qr-refresh-icon"}
+                      aria-hidden="true"
+                    >
+                      ↻
+                    </span>
+                    Refresh QR
+                  </button>
+                </div>
+              ) : (
+                <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
+              )}
               <p className="session-id muted">Session ID: {session.session_id}</p>
               <button
                 className="btn btn-danger btn-large"
