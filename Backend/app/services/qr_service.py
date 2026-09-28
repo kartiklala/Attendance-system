@@ -67,19 +67,37 @@ def build_qr_url(token: str) -> str:
     return f"{base}/attendance?token={token}"
 
 
+def _permanent_expiry(now: datetime) -> datetime:
+    """A Permanent QR has no practical expiry: far-future so it is never
+    rotated automatically (only via the CR's manual refresh)."""
+    return now + timedelta(days=36500)  # ~100 years
+
+
 def _payload(raw_token: str, session_id: str, expires_at, lifetime_seconds: int) -> dict:
-    exp = _parse(expires_at) or _utcnow()
-    remaining = max(0, int((exp - _utcnow()).total_seconds()))
+    try:
+        lifetime = int(lifetime_seconds)
+    except (TypeError, ValueError):
+        lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
+    is_permanent = lifetime == settings.QR_PERMANENT_LIFETIME_SECONDS
+    if is_permanent:
+        expires_in = 0
+        countdown = 0
+    else:
+        exp = _parse(expires_at) or _utcnow()
+        expires_in = lifetime
+        # countdown_seconds is the REMAINING lifetime of the current token so
+        # every CR's display stays in sync with the server rotation.
+        countdown = max(0, int((exp - _utcnow()).total_seconds()))
     return {
         "session_id": session_id,
         "qr_token": raw_token,
         "qr_url": build_qr_url(raw_token),
         # The lifetime configured for THIS session (CR-adjustable via
-        # /qr/lifetime) — never a value the frontend decides on its own.
-        "expires_in_seconds": lifetime_seconds,
-        # countdown_seconds is the REMAINING lifetime of the current token so
-        # every CR's display stays in sync with the server rotation.
-        "countdown_seconds": remaining,
+        # /qr/lifetime) — 0 means Permanent. Never a value the frontend
+        # decides on its own.
+        "expires_in_seconds": expires_in,
+        "countdown_seconds": countdown,
+        "is_permanent": is_permanent,
     }
 
 
@@ -94,8 +112,11 @@ def _read_session(db, session_id):
         raise BadRequestError("Attendance session is no longer active.",
                               code="SESSION_NOT_ACTIVE")
     try:
-        lifetime = int(data.get("qr_lifetime_seconds")
-                       or settings.QR_TOKEN_LIFETIME_SECONDS)
+        raw_lifetime = data.get("qr_lifetime_seconds")
+        # 0 is a valid Permanent lifetime — only fall back when the key is
+        # genuinely absent (None), never on a falsy 0.
+        lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS
+                    if raw_lifetime is None else int(raw_lifetime))
     except (TypeError, ValueError):
         lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
     return (
@@ -155,9 +176,12 @@ def get_current_qr(session_id: str) -> dict:
     raise last_err
 
 
-def _rotate_qr(db, session_id: str) -> dict:
+def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
     """Transactional rotation: create the next token and point the session at
-    it. Serializes concurrent rotations so only one QR becomes current."""
+    it. Serializes concurrent rotations so only one QR becomes current.
+
+    `force=True` (CR manual refresh) mints a brand-new token even when the
+    current one has not expired, invalidating the previous QR."""
     session_ref = db.collection(COLLECTION_SESSIONS).document(session_id)
     tokens = db.collection(COLLECTION_QR_TOKENS)
 
@@ -175,8 +199,9 @@ def _rotate_qr(db, session_id: str) -> dict:
         current_hash = data.get("current_qr_hash")
         current_exp = _parse(data.get("current_qr_expires_at"))
         try:
-            lifetime = int(data.get("qr_lifetime_seconds")
-                           or settings.QR_TOKEN_LIFETIME_SECONDS)
+            raw_lifetime = data.get("qr_lifetime_seconds")
+            lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS
+                        if raw_lifetime is None else int(raw_lifetime))
         except (TypeError, ValueError):
             lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
 
@@ -190,7 +215,8 @@ def _rotate_qr(db, session_id: str) -> dict:
 
         # Another CR already rotated this instant: reuse the still-valid token
         # so all CRs display the same QR and no redundant token is created.
-        if current_exp and now < current_exp and old_snapshot is not None and old_snapshot.exists:
+        # A manual refresh (force) must always mint a NEW token instead.
+        if not force and current_exp and now < current_exp and old_snapshot is not None and old_snapshot.exists:
             doc_data = old_snapshot.to_dict() or {}
             if doc_data.get("active") and doc_data.get("token"):
                 return _payload(doc_data["token"], session_id,
@@ -198,7 +224,10 @@ def _rotate_qr(db, session_id: str) -> dict:
 
         raw = secrets.token_urlsafe(24)  # cryptographically random
         token_hash = _hash_token(raw)
-        expires_at = now + timedelta(seconds=lifetime)
+        if lifetime == settings.QR_PERMANENT_LIFETIME_SECONDS:
+            expires_at = _permanent_expiry(now)
+        else:
+            expires_at = now + timedelta(seconds=lifetime)
         transaction.set(tokens.document(token_hash), {
             "session_id": session_id,
             "token_hash": token_hash,
@@ -217,6 +246,15 @@ def _rotate_qr(db, session_id: str) -> dict:
         return _payload(raw, session_id, _iso(expires_at), lifetime)
 
     return _txn(db.transaction())
+
+
+def rotate_qr_now(session_id: str) -> dict:
+    """CR manual refresh: force an immediate rotation regardless of expiry.
+
+    Mints a brand-new token and invalidates the previous one, so the old QR
+    stops working at once. Under a Permanent lifetime this is the ONLY way the
+    QR changes."""
+    return _rotate_qr(get_db(), session_id, force=True)
 
 
 def invalidate_session_tokens(session_id: str) -> int:

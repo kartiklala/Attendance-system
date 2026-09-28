@@ -38,6 +38,10 @@ class Settings:
     # CR-adjustable QR lifetimes (seconds). Backend validates every request
     # against this list — the frontend can never pick an unsafe value.
     QR_ALLOWED_LIFETIME_SECONDS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    # Sentinel lifetime meaning "never expires". A Permanent QR is only rotated
+    # when the CR presses the manual refresh button (POST /qr/rotate), which
+    # immediately invalidates the previous token.
+    QR_PERMANENT_LIFETIME_SECONDS: int = 0
 
     # CORS / URLs
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")

@@ -239,6 +239,41 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* Permanent QR: message + manual refresh icon (invalidates the old code). */
+.qr-permanent-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.qr-countdown-permanent {
+  color: var(--success, #21a366);
+  font-weight: 600;
+}
+
+.qr-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qr-refresh-icon {
+  display: inline-block;
+  font-size: 1.15em;
+  line-height: 1;
+}
+
+.qr-refresh-icon.spinning {
+  animation: qr-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes qr-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .starting-block,
 .ended-block {
   width: 100%;

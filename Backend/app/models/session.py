@@ -28,6 +28,9 @@ class QRPayload(BaseModel):
     qr_url: str
     expires_in_seconds: int
     countdown_seconds: int
+    # True when the session runs on the Permanent lifetime (never auto-expires;
+    # only the CR's manual refresh replaces it). expires_in_seconds is 0 then.
+    is_permanent: bool = False
 
 
 class StartAttendanceResponse(BaseModel):

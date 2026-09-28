@@ -120,6 +120,11 @@ export const startAttendance = (latitude, longitude, sessionName) =>
 export const refreshQR = (sessionId) =>
   request("/qr/refresh", { method: "POST", body: { session_id: sessionId } });
 
+// CR manual refresh: force a brand-new QR immediately and invalidate the
+// previous one (the only way a Permanent QR changes).
+export const rotateQR = (sessionId) =>
+  request("/qr/rotate", { method: "POST", body: { session_id: sessionId } });
+
 // CR requests a NEW lifetime for future QR rotations; the backend validates
 // it against an allow-list (the frontend never decides QR validity).
 export const setQRLifetime = (sessionId, lifetimeSeconds) =>
