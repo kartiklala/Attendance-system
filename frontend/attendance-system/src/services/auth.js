@@ -2,7 +2,6 @@
 // all authorization decisions happen in FastAPI).
 import {
   GoogleAuthProvider,
-  getAuth,
   getRedirectResult,
   onAuthStateChanged,
   signInWithPopup,
@@ -11,26 +10,6 @@ import {
 } from "firebase/auth";
 import { auth } from "../firebase";
 import { authLog } from "../utils/authLog";
-
-// ---- TEMPORARY popup-isolation experiment diagnostics ---------------------
-// Raw, UNGATED console logs so they also appear on the DEPLOYED build. This is
-// a SECOND onAuthStateChanged LISTENER on the SAME auth instance (NOT a new
-// auth instance); Firebase allows many listeners and this one only logs. It is
-// purely diagnostic and must be removed once the popup test is interpreted.
-// We also print which resolver the singleton actually has, to prove popup can
-// run at all. Never log tokens/credentials — only uid/email/providerData.
-onAuthStateChanged(auth, (user) => {
-  console.log("[AUTH TEST] onAuthStateChanged:", user);
-  if (user) {
-    console.log("[AUTH TEST] UID:", user.uid);
-    console.log("[AUTH TEST] email:", user.email);
-    console.log("[AUTH TEST] provider:", user.providerData);
-  }
-});
-console.log(
-  "[AUTH TEST] resolver on shared auth instance:",
-  getAuth()._popupRedirectResolver ? "present" : "MISSING"
-);
 
 // Full-page redirect instead of a popup: works even when the browser
 // blocks pop-ups. The page reloads after sign-in and the pending result is
@@ -86,29 +65,13 @@ export function clearGoogleRedirectMarker() {
 }
 
 export async function startGoogleSignIn() {
+  // Google sign-in via popup resolves IN-PAGE (no reload), so the AuthContext
+  // observer reports the new user directly and authorizes them with the
+  // backend. A redirect marker is intentionally NOT set: there is no full-page
+  // return to reconcile, keeping the sign-in state machine simple.
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
-
-  // ---- TEMPORARY popup-isolation experiment --------------------------------
-  // We swap ONLY the authentication operation to signInWithPopup and DO NOT
-  // mark a redirect as in-flight, so isReturningFromGoogleRedirect() stays
-  // false: the AuthContext deferral / getRedirectResult / redirectUserRef path
-  // is bypassed and cannot overwrite the popup result. The popup resolves
-  // IN-PAGE (no reload), and the shared auth observer reports the user.
-  console.log("[AUTH TEST] Google popup sign-in started");
-  try {
-    const result = await signInWithPopup(auth, provider);
-    console.log("[AUTH TEST] popup resolved");
-    console.log("[AUTH TEST] result.user:", result.user);
-    console.log("[AUTH TEST] auth.currentUser:", auth.currentUser);
-    return result;
-  } catch (error) {
-    console.error("[AUTH TEST] popup FAILED");
-    console.error("[AUTH TEST] error code:", error.code);
-    console.error("[AUTH TEST] error message:", error.message);
-    throw error;
-  }
-  // ---- end temporary experiment block --------------------------------------
+  return signInWithPopup(auth, provider);
 }
 
 // Original redirect-based Google sign-in, retained but NOT used during the

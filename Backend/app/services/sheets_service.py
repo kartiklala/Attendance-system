@@ -206,7 +206,11 @@ def create_session_sheet(session_id: str, session_name: str,
                 }
             },
         ]
-        sheet.batch_update(requests)
+        # NOTE: Worksheet.batch_update() is gspread's *value-range* helper and
+        # rewrites `data[i]["range"]`, so passing raw Sheets API request objects
+        # (repeatCell/updateCells) raises KeyError: 'range'. Raw requests must go
+        # through the spreadsheet-level batchUpdate endpoint instead.
+        spreadsheet.batch_update({"requests": requests})
         # Conditional formats via the native API (bold red ABSENT / green PRESENT).
         sheet.format(
             f"C2:C{max(len(roster) + 1, 2)}",

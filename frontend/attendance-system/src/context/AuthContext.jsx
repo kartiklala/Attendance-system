@@ -39,9 +39,6 @@ export function AuthProvider({ children }) {
   // getRedirectResult() is still being consumed. Auth callbacks that arrive
   // during this window are provisional and must not decide sign-in state.
   const redirectPendingRef = useRef(isReturningFromGoogleRedirect());
-  // Single decision latch: the first state evaluation that is allowed to be
-  // final wins, so a pre-redirect `null` can never outrun the real user.
-  const decisionRef = useRef(false);
   // A real user observed while the redirect was pending. getRedirectResult()
   // can resolve null on the app root even after a successful sign-in, so this
   // is the fallback that keeps a late `settle` from declaring "signed out".
@@ -124,21 +121,17 @@ export function AuthProvider({ children }) {
     window.location.assign(returnUrl);
   }, [role]);
 
-  // Decide the authentication state EXACTLY once, from a settled user. The
-  // first decision latches; later observer callbacks only sync the cheap
-  // fields, so a provisional signed-out can never overwrite a restored user
-  // (and a real sign-out still clears the role).
+  // Decide the authentication state from the CURRENT user the observer reports.
+  // Google sign-in resolves IN-PAGE via a popup (no full reload), so a real
+  // user can legitimately appear AFTER the app first rendered a signed-out
+  // state. There is no redirect return whose provisional `null` could race the
+  // credential, so we must NOT latch the first decision: doing so made a later
+  // popup user only refresh `firebaseUser` and never re-run /authorize-user,
+  // leaving `role` null and the UI stuck on "Authorizing…". Every observed
+  // state is therefore decided on its own merit — a user always authorizes, an
+  // absent user always clears the role.
   const decide = useCallback(
     async (user) => {
-      if (decisionRef.current) {
-        setFirebaseUser(user || null);
-        if (!user) {
-          setRole(null);
-          setProfile(null);
-        }
-        return;
-      }
-      decisionRef.current = true;
       authLog(user ? "auth state: signed in" : "auth state: signed out");
       setFirebaseUser(user || null);
       setAuthSettled(true);
@@ -306,8 +299,8 @@ export function AuthProvider({ children }) {
     // signs in next in this tab (attempts are bound server-side anyway).
     clearAttendanceAttempt();
     clearGoogleRedirectMarker();
-    // Allow a subsequent sign-in (same tab) to run a fresh decision.
-    decisionRef.current = false;
+    // A signed-out observer resets role/state; a later popup user re-authorizes
+    // through the same decide path, so no latch needs clearing here anymore.
     redirectPendingRef.current = false;
     redirectUserRef.current = null;
     setAuthSettled(false);
