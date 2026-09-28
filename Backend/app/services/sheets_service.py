@@ -46,6 +46,13 @@ def _get_client() -> gspread.Client:
         raise ServiceUnavailableError("Google Sheets credentials not found.")
     try:
         _client = gspread.service_account(filename=str(resolved))
+        # Bound every Sheets HTTP read (shared http_client) so a slow
+        # sheets.googleapis.com call fails fast (ReadTimeout) instead of
+        # hanging until the OS drops it; _get_roster then serves stale data.
+        try:
+            _client.set_timeout(settings.SHEETS_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning("Could not set Google Sheets timeout; using default")
         return _client
     except Exception:
         logger.exception("Failed to open Google Sheets service account")
@@ -121,6 +128,19 @@ def fetch_student_roster() -> list[tuple[str, str]]:
 _SESSION_SHEET_PREFIX = "ATT_"
 _UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
 
+# sheet_title -> {normalized enrollment: 1-based worksheet row}, remembered when
+# a tab is seeded. The tab IS the roster order, so this map is exact: every
+# student marked present in the same process avoids a full-column MATCH against
+# the Sheets API. It is an optimization only — an unknown title (e.g. after a
+# server restart) simply falls back to the formula lookup.
+_session_rows: dict[str, dict[str, int]] = {}
+_SESSION_ROW_CACHE_MAX = 25
+
+
+def _norm_enrollment(value: str) -> str:
+    """Whitespace-free comparison key (mirrors student_service)."""
+    return re.sub(r"\s+", "", str(value or ""))
+
 
 def session_sheet_title(session_id: str, session_name: str) -> str:
     """Deterministic tab name so a duplicate start request never creates a
@@ -130,15 +150,20 @@ def session_sheet_title(session_id: str, session_name: str) -> str:
     return f"{_SESSION_SHEET_PREFIX}{short_id}_{suffix}"[:100]
 
 
-def create_session_sheet(session_id: str, session_name: str) -> str:
+def create_session_sheet(session_id: str, session_name: str,
+                         roster: list[tuple[str, str]] | None = None) -> str:
     """Create (or reuse) the session worksheet seeded with everyone ABSENT.
 
     Returns the worksheet title. Enrollment numbers are written as TEXT so
     leading zeros survive; PRESENT/ABSENT colours are conditional formats so
     later status updates re-colour automatically.
+
+    `roster` may be supplied by the caller (the process-cached Sheet1 read) to
+    avoid downloading the roster a second time for the same session start.
     """
     spreadsheet = _open_spreadsheet()
-    roster = fetch_student_roster()
+    if roster is None:
+        roster = fetch_student_roster()
     title = session_sheet_title(session_id, session_name)
 
     # Idempotent: an existing tab (retry / duplicate submit) is reused as-is.
@@ -204,22 +229,44 @@ def create_session_sheet(session_id: str, session_name: str) -> str:
         logger.exception("Could not create the session sheet title=%s", title)
         raise ServiceUnavailableError("Could not create the session Google Sheet.")
     logger.info("Session sheet created title=%s students=%s", title, len(roster))
+    _remember_rows(title, roster)
     return title
 
 
-def mark_student_present(sheet_title: str, enrollment_no: str) -> None:
+def _remember_rows(title: str, roster: list[tuple[str, str]]) -> None:
+    """Index the seeded rows (row 1 is the header) for later fast updates."""
+    if len(_session_rows) >= _SESSION_ROW_CACHE_MAX:
+        _session_rows.pop(next(iter(_session_rows)), None)  # trim oldest tab
+    _session_rows[title] = {
+        _norm_enrollment(enrollment): index + 2
+        for index, (enrollment, _name) in enumerate(roster)
+    }
+
+
+def mark_student_present(sheet_title: str, enrollment_no: str,
+                         row: int | None = None) -> None:
     """Flip one student's Status cell to PRESENT in the session worksheet.
-    The enrollment comes from backend-verified data, never from user input."""
+    The enrollment comes from backend-verified data, never from user input.
+
+    `row` is the 1-based worksheet row the caller already knows. When it is not
+    supplied, the row remembered from seeding this tab is used; only when that
+    is unknown too does the service fall back to the MATCH formula lookup.
+    """
     try:
         sheet = _open_spreadsheet().worksheet(sheet_title)
-        # Exact match on the raw enrollment value; "" means not found.
-        found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
-        row = str(found[0][0]).strip() if found and found[0] else ""
-        if not row or not row.replace(".0", "").isdigit():
-            logger.warning("Enrollment not found on session sheet title=%s", sheet_title)
-            return
-        sheet.update(f"C{int(float(row))}", [["PRESENT"]],
-                     value_input_option="RAW")
+        target = row or _session_rows.get(sheet_title, {}).get(
+            _norm_enrollment(enrollment_no)
+        )
+        if target is None:
+            # Exact match on the raw enrollment value; "" means not found.
+            found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
+            raw = str(found[0][0]).strip() if found and found[0] else ""
+            if not raw or not raw.replace(".0", "").isdigit():
+                logger.warning("Enrollment not found on session sheet title=%s",
+                               sheet_title)
+                return
+            target = int(float(raw))
+        sheet.update(f"C{int(target)}", [["PRESENT"]], value_input_option="RAW")
     except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):

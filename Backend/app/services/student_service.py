@@ -50,9 +50,31 @@ def _get_roster() -> list[tuple[str, str]]:
     now = time.monotonic()
     if _roster_cache and now - _roster_cache[0] < _ROSTER_CACHE_TTL_SECONDS:
         return _roster_cache[1]
-    roster = sheets_service.fetch_student_roster()
+    try:
+        roster = sheets_service.fetch_student_roster()
+    except Exception:
+        # A transient Sheets read failure (e.g. ReadTimeout) must never 500 the
+        # live dashboard: if a roster has loaded at least once, serve it stale
+        # (the roster changes rarely). Only a cold cache is a hard failure, and
+        # even that surfaces as a clean 503 rather than an unhandled 500.
+        if _roster_cache:
+            logger.warning("Google Sheets roster read failed; serving stale roster")
+            return _roster_cache[1]
+        logger.exception("Google Sheets roster read failed with no cached roster")
+        raise ServiceUnavailableError(
+            "Could not read the student roster from Google Sheets."
+        )
     _roster_cache = (now, roster)
     return roster
+
+
+def get_roster() -> list[tuple[str, str]]:
+    """Public accessor for the process-cached Sheet1 roster (60s TTL).
+
+    Session start uses this instead of calling the Sheets API again, so one
+    session start downloads the roster at most once per cache window.
+    """
+    return _get_roster()
 
 
 def roster_size() -> int:
@@ -132,7 +154,11 @@ def resolve_last3(last3: str) -> tuple[str, str]:
 # ---- Firebase UID <-> verified enrollment ---------------------------------
 
 def get_saved_enrollment(uid: str) -> dict | None:
-    """Return {name, enrollment_no} only when it was backend-verified before."""
+    """Return {name, enrollment_no, photo_url} only when backend-verified.
+
+    `photo_url` is the Google avatar captured during authorization; it lets
+    the attendance record carry the picture the CR popup shows.
+    """
     if not uid:
         return None
     snapshot = get_db().collection(COLLECTION_USERS).document(uid).get()
@@ -143,6 +169,7 @@ def get_saved_enrollment(uid: str) -> dict | None:
         return {
             "name": data.get("student_name") or data.get("name") or "",
             "enrollment_no": str(data["enrollment_no"]),
+            "photo_url": str(data.get("photo_url") or ""),
         }
     return None
 

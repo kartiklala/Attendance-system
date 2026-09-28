@@ -77,3 +77,6 @@ COLLECTION_SESSIONS = "sessions"
 COLLECTION_SESSION_STATE = "session_state"
 COLLECTION_QR_TOKENS = "qr_tokens"
 COLLECTION_ATTENDANCE = "attendance"
+# Individual student attendance attempts: the completion timer is per attempt,
+# never per QR token, so a QR rotation cannot invalidate a student mid-flow.
+COLLECTION_ATTENDANCE_ATTEMPTS = "attendance_attempts"
