@@ -78,6 +78,25 @@ export const authorizeUser = async (firebaseIdToken) => {
   return data;
 };
 
+// True while the in-memory application JWT is still usable (checked with >30s
+// of slack). Part of removing redundant authorization latency: the student flow
+// only re-runs /authorize-user when this says the session is actually gone.
+// The payload is decoded for its expiry claim only — authorization itself is
+// always verified server-side, so an inaccurate local read is harmless.
+export function hasValidApplicationToken() {
+  if (!applicationJwt) return false;
+  try {
+    const part = applicationJwt.split(".")[1];
+    if (!part) return false;
+    const b64 = part.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64.padEnd(Math.ceil(b64.length / 4) * 4, "=");
+    const { exp } = JSON.parse(atob(padded));
+    return typeof exp === "number" && exp * 1000 - Date.now() > 30_000;
+  } catch {
+    return false;
+  }
+}
+
 export const logout = async () => {
   try {
     return await request("/logout", { method: "POST" });
@@ -119,8 +138,20 @@ export const getSessionSummary = (sessionId) =>
   request(`/sessions/${sessionId}/summary`);
 
 // ---- Student ------------------------------------------------------------
-export const verifyToken = (sessionToken) =>
-  request("/attendance/verify-token", { method: "POST", body: { session_token: sessionToken } });
+// Entry gateway: fired the moment /attendance?token=… opens, BEFORE Google
+// sign-in and before any location prompt. Public by design (no JWT), and the
+// QR token is the only thing it sends — no name, enrollment or status.
+// The backend answers with an opaque attempt id plus its own server-side
+// completion window, so a QR rotating seconds later cannot invalidate the
+// student's attempt.
+export const startAttempt = (token) =>
+  request("/attendance/attempt/start", { method: "POST", body: { token } });
+
+// After authentication: the backend binds the attempt to the verified Firebase
+// UID (identity is never claimed by the client) and returns the saved student
+// identity in the same round trip.
+export const bindAttempt = (attemptId) =>
+  request("/attendance/attempt/bind", { method: "POST", body: { attempt_id: attemptId } });
 
 // Whether this Google account already has a backend-verified enrollment.
 export const getStudentMe = () => request("/student/me");
@@ -133,13 +164,14 @@ export const studentLookup = (last3) =>
 export const studentConfirm = (last3) =>
   request("/student/confirm", { method: "POST", body: { last3 } });
 
-// Identity comes from the verified enrollment saved against the UID — the
-// request body carries no name/enrollment fields at all.
-export const checkAttendance = ({ sessionToken, latitude, longitude }) =>
+// Identity comes from the verified enrollment saved against the UID, and the
+// completion window from the bound attendance attempt — the request body
+// carries no name, enrollment, QR token or status field at all.
+export const checkAttendance = ({ attemptId, latitude, longitude }) =>
   request("/attendance/check", {
     method: "POST",
     body: {
-      session_token: sessionToken,
+      attempt_id: attemptId,
       latitude,
       longitude,
     },

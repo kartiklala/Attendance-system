@@ -4,13 +4,18 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
 import * as api from "../services/api";
 import {
+  clearAttendanceAttempt,
+  clearGoogleRedirectMarker,
   completeRedirectSignIn,
+  getCurrentFirebaseUser,
   getFirebaseIdToken,
+  isReturningFromGoogleRedirect,
   observeAuthUser,
   signOutUser,
   startGoogleSignIn,
   takeAttendanceReturnUrl,
 } from "../services/auth";
+import { authLog } from "../utils/authLog";
 
 const AuthContext = createContext(null);
 
@@ -23,7 +28,21 @@ export function AuthProvider({ children }) {
   // could not be re-issued: all session/attendance UI state must be dropped
   // and fresh authorization required (spec: no stale "Continue").
   const [requiresReauth, setRequiresReauth] = useState(false);
+  // Three distinct authentication states — `firebaseUser === null` alone means
+  // "definitely signed out", never "not decided yet":
+  //   authSettled=false → Firebase has not finished determining the user
+  //   authSettled=true, firebaseUser=null → genuinely signed out
+  //   authSettled=true, firebaseUser set  → signed in
+  const [authSettled, setAuthSettled] = useState(false);
   const mounted = useRef(true);
+  // True only for the brief window after a redirect return, while
+  // getRedirectResult() is still being consumed. Auth callbacks that arrive
+  // during this window are provisional and must not decide sign-in state.
+  const redirectPendingRef = useRef(isReturningFromGoogleRedirect());
+  // A real user observed while the redirect was pending. getRedirectResult()
+  // can resolve null on the app root even after a successful sign-in, so this
+  // is the fallback that keeps a late `settle` from declaring "signed out".
+  const redirectUserRef = useRef(null);
 
   useEffect(() => {
     mounted.current = true;
@@ -74,37 +93,160 @@ export function AuthProvider({ children }) {
   // /authorize-user) means the HttpOnly cookie is committed BEFORE we
   // navigate — navigating on `firebaseUser` alone reloads the page mid-flight
   // and aborts that first /authorize-user, leaving no cookie (UNAUTHORIZED).
+  //
+  // If the parked URL is the route we are already on, do not "navigate" with a
+  // full-page reload at all: an identical assign() reloads the app for nothing
+  // and restarts this whole sequence.
   useEffect(() => {
     if (!role) return;                            // not authorized yet: wait
     if (window.location.pathname !== "/") return;  // only recover the root landing
     const returnUrl = takeAttendanceReturnUrl();
-    if (returnUrl) window.location.assign(returnUrl);
+    if (!returnUrl) return;
+    let target;
+    try {
+      target = new URL(returnUrl, window.location.origin);
+    } catch {
+      return; // unreadable parked value: drop it rather than loop
+    }
+    const sameRoute =
+      target.pathname === window.location.pathname &&
+      target.search === window.location.search;
+    if (sameRoute) {
+      authLog("already on the resumed route, skipping reload", {
+        pathname: target.pathname,
+      });
+      return;
+    }
+    authLog("resuming parked route", { pathname: target.pathname });
+    window.location.assign(returnUrl);
   }, [role]);
 
-  // Bootstrap: restore an existing Firebase session and re-authorize. Also
-  // consume any pending redirect-sign-in result (Google login returns via
-  // full-page redirect, so the app reloads right after the account picker).
-  useEffect(() => {
-    completeRedirectSignIn().catch((err) => {
-      if (mounted.current) setError(err.message || "Sign-in failed. Please try again.");
-    });
-    const unsubscribe = observeAuthUser(async (user) => {
+  // Decide the authentication state from the CURRENT user the observer reports.
+  // Google sign-in resolves IN-PAGE via a popup (no full reload), so a real
+  // user can legitimately appear AFTER the app first rendered a signed-out
+  // state. There is no redirect return whose provisional `null` could race the
+  // credential, so we must NOT latch the first decision: doing so made a later
+  // popup user only refresh `firebaseUser` and never re-run /authorize-user,
+  // leaving `role` null and the UI stuck on "Authorizing…". Every observed
+  // state is therefore decided on its own merit — a user always authorizes, an
+  // absent user always clears the role.
+  const decide = useCallback(
+    async (user) => {
+      authLog(user ? "auth state: signed in" : "auth state: signed out");
       setFirebaseUser(user || null);
+      setAuthSettled(true);
       if (!user) {
         setRole(null);
         setProfile(null);
         setRequiresReauth(false);
         return;
       }
+      // A completed redirect that yields an account ends the one-time guard.
+      clearGoogleRedirectMarker();
       try {
-        const token = await user.getIdToken(true);
+        const token = await user.getIdToken(false);
         await authorize(token);
+        authLog("application session established");
       } catch (err) {
-        if (mounted.current) setError(err.message || "Authorization failed.");
+        if (mounted.current) {
+          setError(err?.message || "Authorization failed.");
+        }
       }
+    },
+    [authorize]
+  );
+
+  // Bootstrap: consume any pending redirect result BEFORE deciding. Google's
+  // redirect forces a full reload, and while getRedirectResult() resolves the
+  // SDK can briefly report onAuthStateChanged(null). Treating that provisional
+  // null as "signed out" re-triggered signInWithRedirect() and looped forever.
+  //
+  // The marker is PEEKED (not consumed) here so StudentAttendance can later
+  // detect "we already sent this student to Google" and offer a manual button
+  // instead of auto-redirecting again.
+  useEffect(() => {
+    const returned = isReturningFromGoogleRedirect();
+    authLog("initialization started", { returnedFromRedirect: returned });
+    let cancelled = false;
+    const settle = (result, failure) => {
+      if (cancelled) return;
+      if (failure) {
+        authLog("redirect result rejected", { code: failure.code || "unknown" });
+      }
+      redirectPendingRef.current = false;
+      // Prefer the settled user: the SDK's own currentUser, then any real user
+      // the observer already reported during the pending window, then the
+      // redirect result. A null here only happens if genuinely nobody signed in.
+      decide(
+        getCurrentFirebaseUser() || redirectUserRef.current || result?.user || null
+      );
+    };
+    if (returned) {
+      redirectPendingRef.current = true;
+      completeRedirectSignIn().then(
+        (result) => settle(result, null),
+        (err) => {
+          if (mounted.current) {
+            // Surface the real Firebase error code, not just a generic message:
+            // auth/unauthorized-domain, auth/operation-not-supported-in-environment,
+            // auth/internal-error, auth/network-request-failed etc. point at a
+            // Firebase Console / configuration problem, not a code bug. The code
+            // itself is not a token and is safe to show.
+            setError(
+              err?.code
+                ? `Sign-in failed (${err.code}).`
+                : err?.message || "Sign-in failed. Please try again."
+            );
+          }
+          settle(null, err);
+        }
+      );
+      // Safety net: never strand the student on a spinner if the SDK stalls.
+      const watchdog = setTimeout(() => {
+        if (redirectPendingRef.current) {
+          authLog("redirect result watchdog fired");
+          settle(null, null);
+        }
+      }, 10_000);
+      return () => {
+        cancelled = true;
+        clearTimeout(watchdog);
+      };
+    }
+    // No pending redirect: the observer decides normally. Still run
+    // getRedirectResult once (documented pattern) but never gate on its result.
+    completeRedirectSignIn().catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [decide]);
+
+  // Observer: publish auth state. The FIRST callback carrying a real user is
+  // authoritative — on the app root, getRedirectResult() frequently resolves
+  // with null even after a SUCCESSFUL redirect (the SDK has already applied
+  // the credential to storage and delivered it here). So a user seen while the
+  // redirect is pending settles signed-in immediately, while a provisional
+  // null is simply deferred (never allowed to decide "signed out" too early,
+  // which is what re-triggered the redirect loop).
+  useEffect(() => {
+    const unsubscribe = observeAuthUser((user) => {
+      if (redirectPendingRef.current) {
+        if (user) {
+          authLog("redirect restored user via observer; settling signed-in");
+          redirectUserRef.current = user;
+          redirectPendingRef.current = false;
+          decide(user);
+          return;
+        }
+        authLog("auth state deferred until redirect completes", {
+          hasUser: false,
+        });
+        return;
+      }
+      decide(user);
     });
     return unsubscribe;
-  }, [authorize]);
+  }, [decide]);
 
   // Redirect flow: this kicks off navigation to Google and never resolves
   // with a user — after the return reload the bootstrap effect above
@@ -123,20 +265,29 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  // Guarantee a fresh backend application-JWT cookie for the CURRENT Firebase
+  // Guarantee a working backend application session for the CURRENT Firebase
   // user before any protected call. The redirect flow authorizes
   // asynchronously at boot, so the student flow awaits this instead of racing
-  // an ambient /authorize-user (which caused verify-token 401 "not signed in").
+  // an ambient /authorize-user (which caused 401 "not signed in" errors).
+  //
+  // When the session is ALREADY valid this returns immediately: re-running
+  // getIdToken(true) + /authorize-user just because a button was pressed cost
+  // two extra round trips and granted nothing. Genuinely expired/revoked
+  // sessions still re-authorize (missing role, JWT about to expire, or the
+  // api layer's 401 recovery path).
   const ensureSession = useCallback(async () => {
+    if (role && !requiresReauth && api.hasValidApplicationToken()) return role;
     try {
-      const token = await getFirebaseIdToken(true);
+      // Use the cached ID token (the boot listener already validated the
+      // Firebase session); only the 401 recovery path forces a refresh.
+      const token = await getFirebaseIdToken(false);
       if (!token) return null;
       const user = await authorize(token);
       return user ? user.role : null;
     } catch {
       return null;
     }
-  }, [authorize]);
+  }, [authorize, role, requiresReauth]);
 
   const logout = useCallback(async () => {
     try {
@@ -144,6 +295,16 @@ export function AuthProvider({ children }) {
     } catch {
       /* cookie already gone or network issue — continue signing out locally */
     }
+    // A signed-out student must never leave an attempt parked for whoever
+    // signs in next in this tab (attempts are bound server-side anyway).
+    clearAttendanceAttempt();
+    clearGoogleRedirectMarker();
+    // A signed-out observer resets role/state; a later popup user re-authorizes
+    // through the same decide path, so no latch needs clearing here anymore.
+    redirectPendingRef.current = false;
+    redirectUserRef.current = null;
+    setAuthSettled(false);
+    setFirebaseUser(undefined);
     await signOutUser();
     setRole(null);
     setProfile(null);
@@ -154,6 +315,7 @@ export function AuthProvider({ children }) {
     <AuthContext.Provider
       value={{
         firebaseUser,   // Firebase user object or null (undefined while loading)
+        authSettled,    // Firebase has definitively resolved signed-in/out
         profile,        // { uid, name, email, role } from the backend
         role,           // "admin" | "cr" | "student" | null
         error,

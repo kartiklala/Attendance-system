@@ -494,6 +494,10 @@ form input:focus {
   position: absolute;
   right: 18px;
   bottom: -60px; /* start just below the visible viewport */
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(78vw, 320px);
   padding: 6px 14px;
   border-radius: 999px;
   background: #dcfce7;
@@ -503,16 +507,40 @@ form input:focus {
   font-size: 0.85rem;
   white-space: nowrap;
   box-shadow: 0 2px 8px rgba(22, 101, 52, 0.18);
-  /* 100vh climb ≈ full travel; staggered animation-delay keeps close
-     arrivals from completely overlapping each other. */
+  /* Climb the full viewport height while drifting to the right, so each
+     arrival travels from the bottom of the screen toward the top-right
+     corner. Staggered animation-delay keeps close arrivals from completely
+     overlapping each other. */
   animation: popup-rise 4.2s ease-out forwards;
 }
 
+/* Google profile avatar (or the Google icon fallback) beside the name. */
+.present-popup-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  flex: 0 0 auto;
+  background: #ffffff;
+  border: 1px solid #86efac;
+  align-items: center;
+  justify-content: center;
+}
+
+.present-popup-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.present-popup-check {
+  font-weight: 800;
+}
+
 @keyframes popup-rise {
-  0% { opacity: 0; transform: translateY(0); }
+  0% { opacity: 0; transform: translate(-12vw, 0); }
   8% { opacity: 1; }
   85% { opacity: 1; }
-  100% { opacity: 0; transform: translateY(calc(-100vh - 80px)); }
+  100% { opacity: 0; transform: translate(0, calc(-100vh - 80px)); }
 }
 
 /* The dashboard card must float above the water layer. */

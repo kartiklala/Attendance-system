@@ -105,11 +105,15 @@ def create_or_get_session(
                     session_id, session_name, session.get("radius_meters"))
         # Per-session Google Sheet tab (ABSENT roster copy). Best-effort:
         # the session stays functional if the Sheets API is unavailable —
-        # Firestore remains the source of truth.
+        # Firestore remains the source of truth. The roster comes from the
+        # shared 60s process cache so starting a session never downloads the
+        # whole Sheet1 twice.
         try:
-            from app.services import sheets_service
+            from app.services import sheets_service, student_service
 
-            title = sheets_service.create_session_sheet(session_id, session_name)
+            title = sheets_service.create_session_sheet(
+                session_id, session_name, roster=student_service.get_roster()
+            )
             db.collection(COLLECTION_SESSIONS).document(session_id).update(
                 {"sheet_title": title}
             )

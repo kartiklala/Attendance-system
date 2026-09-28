@@ -9,11 +9,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox, ProgressBar } from "../components/ui";
+import { ErrorBox, GoogleIcon, ProgressBar } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 const REFRESH_SECONDS_FALLBACK = 10;
-const STATS_POLL_MS = 5000; // reasonable interval — no hammering
+// Live stats poll every 15 s: one interval per active session, stopped when the
+// session ends and when this dashboard unmounts (see stopClock).
+const STATS_POLL_MS = 15000;
 const POPUP_LIFETIME_MS = 4200;
 // Mirrors the backend allow-list (settings.QR_ALLOWED_LIFETIME_SECONDS) —
 // the server validates every value again, this only shapes the dropdown.
@@ -103,12 +105,17 @@ export default function CRDashboard() {
             return;
           }
           // Float a popup for each newly recorded arrival (backend data only).
+          // `seenRef` guarantees one popup per attendance event, so the slower
+          // 15 s polling can never repeat a student's arrival.
           for (const event of s.recent || []) {
             const key = `${event.name}|${event.marked_at}`;
             if (!seenRef.current.has(key)) {
               seenRef.current.add(key);
               const id = `${key}|${Date.now()}`;
-              setPopups((current) => [...current.slice(-5), { id, name: event.name }]);
+              setPopups((current) => [
+                ...current.slice(-5),
+                { id, name: event.name, photoUrl: event.photo_url || "" },
+              ]);
               setTimeout(
                 () => setPopups((current) => current.filter((p) => p.id !== id)),
                 POPUP_LIFETIME_MS
@@ -340,10 +347,12 @@ export default function CRDashboard() {
   };
 
   const renderPopups = () => (
-    /* "Student present" floats: rise from the BOTTOM of the viewport toward
-       the top-right (backend-sourced; pointer-events none so they never
-       block CR controls). Staggered delays keep simultaneous arrivals from
-       completely overlapping. */
+    /* "Student present" floats: start at the BOTTOM edge of the viewport and
+       travel up towards the top-right corner (backend-sourced; pointer-events
+       none so they never block CR controls). Staggered delays keep simultaneous
+       arrivals from completely overlapping. The avatar is the student's own
+       Google profile picture; when it is missing or fails to load the Google
+       icon is shown instead. */
     <div className="popup-layer" aria-live="polite">
       {popups.map((popup, index) => (
         <div
@@ -351,7 +360,28 @@ export default function CRDashboard() {
           className="present-popup"
           style={{ animationDelay: `${index * 0.18}s` }}
         >
-          {popup.name} ✓
+          {popup.photoUrl ? (
+            <img
+              className="present-popup-avatar"
+              src={popup.photoUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                // Hide the broken image and reveal the Google fallback icon.
+                event.currentTarget.style.display = "none";
+                const fallback = event.currentTarget.nextElementSibling;
+                if (fallback) fallback.style.display = "inline-flex";
+              }}
+            />
+          ) : null}
+          <span
+            className="present-popup-avatar present-popup-avatar-fallback"
+            style={{ display: popup.photoUrl ? "none" : "inline-flex" }}
+          >
+            <GoogleIcon />
+          </span>
+          <span className="present-popup-name">{popup.name}</span>
+          <span className="present-popup-check">✓</span>
         </div>
       ))}
     </div>

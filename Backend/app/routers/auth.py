@@ -35,7 +35,8 @@ def authorize_user(request: Request, response: Response) -> AuthorizeResponse:
     """
     identity = auth_service.verify_firebase_id_token(_bearer_token(request))
     role = auth_service.determine_role(identity["email"])
-    auth_service.upsert_user(identity["uid"], identity["name"], identity["email"], role)
+    auth_service.upsert_user(identity["uid"], identity["name"], identity["email"], role,
+                             photo_url=identity["photo"])
 
     token = create_application_jwt(identity["uid"], role, identity["email"])
     apply_auth_cookie(response, token)
