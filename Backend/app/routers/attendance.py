@@ -193,7 +193,7 @@ def get_session(
 ) -> SessionResponse:
     """Authenticated: view session details (location redacted for students)."""
     session = session_service.get_session(session_id)
-    if user.role != "cr":
+    if user.role not in ("cr", "admin"):
         session = {**session, "cr_uid": "", "latitude": 0.0, "longitude": 0.0}
     return SessionResponse(success=True, session=_session_info(session))
 

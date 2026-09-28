@@ -4,7 +4,9 @@ Roles are decided HERE (never by the frontend):
 - `admins` collection email      -> "admin"   (manages the CR list)
 - `admin_list` collection email  -> "cr"      (runs attendance sessions)
 - everyone else                  -> "student"
-Being an admin does NOT make you a CR — the lists are independent.
+An "admin" role string is used for both, and require_cr() explicitly lets
+admins through, so an admin has every CR capability WITHOUT needing to also
+appear in `admin_list`. Admins are still rejected from student-only actions.
 """
 import logging
 import re

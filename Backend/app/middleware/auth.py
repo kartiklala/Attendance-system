@@ -60,7 +60,8 @@ def get_current_user(request: Request) -> CurrentUser:
 
 
 def require_cr(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    if user.role != "cr":
+    """CR endpoints. Admins inherit every CR capability, so both roles pass."""
+    if user.role not in ("cr", "admin"):
         raise ForbiddenError("Only a Class Representative can perform this action.",
                              code="CR_ONLY")
     return user

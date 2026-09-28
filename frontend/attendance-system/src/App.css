@@ -201,6 +201,22 @@ body {
   text-align: left;
 }
 
+/* Header action cluster (Admins get a "Admin Dashboard" button beside Sign out). */
+.cr-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Admin dashboard cross-navigation to the inherited CR area. */
+.admin-role-nav {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
 .qr-block {
   display: flex;
   flex-direction: column;
@@ -899,6 +915,42 @@ form input:focus {
   padding: 3px 0;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.9rem;
+}
+
+.admin-cr-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.admin-cr-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Red "X" that removes a CR from the authoritative list. */
+.admin-cr-remove {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #b91c1c;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.admin-cr-remove:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.admin-cr-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 /* ---- Responsive ----------------------------------------------------------- */
