@@ -1,4 +1,4 @@
-"""Admin routes: manage the authoritative CR list (POST/GET /admin/cr).
+"""Admin routes: manage the authoritative CR list (POST/GET/DELETE /admin/cr).
 
 The role of the caller is verified from the backend-signed application JWT —
 a student or CR crafting this request manually is rejected (ADMIN_ONLY).
@@ -15,7 +15,7 @@ from app.middleware.auth import CurrentUser, require_admin
 from app.models.auth import MessageResponse
 from app.core.firebase import COLLECTION_ADMIN_LIST, get_db
 from app.services import auth_service
-from app.services.errors import BadRequestError, ConflictError
+from app.services.errors import BadRequestError, ConflictError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +78,25 @@ def add_cr(
         message = "CR added successfully."
     logger.info("CR email added to admin_list by admin uid")
     return MessageResponse(success=True, message=message)
+
+
+@router.delete("/admin/cr/{email}", response_model=MessageResponse)
+def remove_cr(
+    email: str,
+    admin: CurrentUser = Depends(require_admin),
+) -> MessageResponse:
+    """Admin-only: remove a CR email from the authoritative admin_list.
+
+    The document id is the normalized email (same scheme as add_cr), so the
+    lookup is exact. Removing a non-existent CR is a 404 rather than silent."""
+    target = auth_service.normalize_email(email)
+    if not target or not auth_service.is_valid_email(target):
+        raise BadRequestError("Please enter a valid email address.",
+                              code="INVALID_EMAIL")
+    db = get_db()
+    ref = db.collection(COLLECTION_ADMIN_LIST).document(DOC_ID_SAFE_RE.sub("_", target))
+    if not ref.get().exists:
+        raise NotFoundError("That CR email was not found.", code="CR_NOT_FOUND")
+    ref.delete()
+    logger.info("CR email removed from admin_list by admin uid")
+    return MessageResponse(success=True, message="CR removed successfully.")

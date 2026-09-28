@@ -4,12 +4,14 @@
 // admin role from the signed JWT on every call (a manually crafted request
 // from a student/CR is rejected with 403 regardless of this UI).
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
 import { ErrorBox } from "../components/ui";
 
 export default function AdminDashboard() {
   const { profile, logout } = useAuth();
+  const navigate = useNavigate();
   const [emails, setEmails] = useState([]);
   const [listError, setListError] = useState(null);
   const [email, setEmail] = useState("");
@@ -17,6 +19,8 @@ export default function AdminDashboard() {
   const [notice, setNotice] = useState(null);
   // Disable "Add CR" on the first click while the request is in flight.
   const [adding, setAdding] = useState(false);
+  // Email currently being removed (disables its X while the request settles).
+  const [removing, setRemoving] = useState(null);
 
   const loadList = useCallback(async () => {
     try {
@@ -70,6 +74,23 @@ export default function AdminDashboard() {
     }
   };
 
+  // Admin removes a CR from the authoritative list (backend DELETE /admin/cr).
+  const handleRemove = async (addr) => {
+    if (removing) return; // one removal at a time — avoids list races
+    setRemoving(addr);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const data = await api.removeCR(addr);
+      setNotice(data.message || "CR removed successfully.");
+      await loadList();
+    } catch (err) {
+      setActionError(err.message || "Could not remove that CR email.");
+    } finally {
+      setRemoving(null);
+    }
+  };
+
   return (
     <div className="page-center">
       <div className="card">
@@ -82,6 +103,17 @@ export default function AdminDashboard() {
           </div>
           <button className="btn btn-ghost" onClick={() => logout().catch(() => {})}>
             Sign out
+          </button>
+        </div>
+
+        {/* Admins inherit every CR capability, so offer a direct entry. */}
+        <div className="admin-role-nav">
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            onClick={() => navigate("/cr")}
+          >
+            Open CR Dashboard
           </button>
         </div>
 
@@ -117,7 +149,19 @@ export default function AdminDashboard() {
           ) : (
             <ul className="admin-cr-list">
               {emails.map((addr) => (
-                <li key={addr}>{addr}</li>
+                <li key={addr} className="admin-cr-item">
+                  <span className="admin-cr-email">{addr}</span>
+                  <button
+                    type="button"
+                    className="admin-cr-remove"
+                    onClick={() => handleRemove(addr)}
+                    disabled={removing === addr || (removing !== null)}
+                    title="Remove this CR"
+                    aria-label={`Remove ${addr}`}
+                  >
+                    {removing === addr ? "…" : "✕"}
+                  </button>
+                </li>
               ))}
             </ul>
           )}

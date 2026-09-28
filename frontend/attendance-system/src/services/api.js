@@ -190,4 +190,9 @@ export const listCRs = () => request("/admin/cr");
 export const addCR = (email) =>
   request("/admin/cr", { method: "POST", body: { email } });
 
+// Admin removes a CR. Email goes in the path (normalized server-side) so no
+// request body is needed on this DELETE.
+export const removeCR = (email) =>
+  request(`/admin/cr/${encodeURIComponent(email)}`, { method: "DELETE" });
+
 export default request;

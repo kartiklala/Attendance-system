@@ -6,6 +6,7 @@
 // The QR only carries a random short-lived token URL — never JWTs,
 // ID tokens or personal data. All validity decisions are made by FastAPI.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
@@ -48,7 +49,8 @@ function downloadAbsenteeCSV(summary) {
 }
 
 export default function CRDashboard() {
-  const { profile, logout } = useAuth();
+  const { profile, role, logout } = useAuth();
+  const navigate = useNavigate();
   // loading -> idle -> starting -> active -> ending -> ended
   const [stage, setStage] = useState("loading");
   const [session, setSession] = useState(null); // { session_id, qr: {...} }
@@ -595,9 +597,20 @@ export default function CRDashboard() {
                 Welcome, {profile?.name || profile?.email || "CR"}
               </p>
             </div>
-            <button className="btn btn-ghost" onClick={logout}>
-              Sign out
-            </button>
+            <div className="cr-header-actions">
+              {role === "admin" && (
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => navigate("/admin")}
+                >
+                  Admin Dashboard
+                </button>
+              )}
+              <button className="btn btn-ghost" onClick={logout}>
+                Sign out
+              </button>
+            </div>
           </header>
 
           {stage === "loading" && <ProgressBar percent={40} />}

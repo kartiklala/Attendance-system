@@ -40,7 +40,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.frontend_origins,  # never "*" in production
     allow_credentials=True,                    # required for HttpOnly cookies
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
