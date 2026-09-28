@@ -19,7 +19,14 @@ const STATS_POLL_MS = 15000;
 const POPUP_LIFETIME_MS = 4200;
 // Mirrors the backend allow-list (settings.QR_ALLOWED_LIFETIME_SECONDS) —
 // the server validates every value again, this only shapes the dropdown.
+// `0` is the backend's Permanent sentinel (never auto-expires; only the CR's
+// manual refresh changes it).
+const QR_LIFETIME_PERMANENT = 0;
 const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
+
+// A QR payload is "Permanent" when the backend flags it or reports a 0s life.
+const isPermanentQr = (qr) =>
+  !!qr && (qr.is_permanent === true || qr.expires_in_seconds === 0);
 
 // Absentee CSV (backend-verified data). Quoted fields + BOM so enrollment
 // numbers with leading zeros open correctly in Excel.
@@ -56,6 +63,7 @@ export default function CRDashboard() {
   const [qrLifetime, setQrLifetime] = useState(REFRESH_SECONDS_FALLBACK);
   const [lifetimeSaving, setLifetimeSaving] = useState(false);
   const [lifetimeNotice, setLifetimeNotice] = useState(null);
+  const [qrRefreshing, setQrRefreshing] = useState(false); // manual QR refresh
   const [copied, setCopied] = useState(false); // "Copied!" on the absentee list
   const timerRef = useRef(null);
   const tickRef = useRef(0);
@@ -71,6 +79,15 @@ export default function CRDashboard() {
     if (statsRef.current) {
       clearInterval(statsRef.current);
       statsRef.current = null;
+    }
+  }, []);
+
+  // Stop ONLY the QR auto-rotation clock (used for Permanent mode); the live
+  // stats polling keeps running so the water-fill/popups stay live.
+  const stopRotationClock = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
   }, []);
 
@@ -192,13 +209,20 @@ export default function CRDashboard() {
             session_name: data.session.session_name || "",
             qr: data.qr,
           });
-          setQrLifetime(data.session.qr_lifetime_seconds || REFRESH_SECONDS_FALLBACK);
+          const rawLifetime = data.session.qr_lifetime_seconds;
+          setQrLifetime(rawLifetime == null ? REFRESH_SECONDS_FALLBACK : rawLifetime);
           if (data.stats) setStats(data.stats);
           setStage("active");
-          startClock(
-            data.session.session_id,
-            data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
-          );
+          if (isPermanentQr(data.qr)) {
+            // Permanent: no auto-rotation clock; CR refreshes manually.
+            stopRotationClock();
+            setCountdown(0);
+          } else {
+            startClock(
+              data.session.session_id,
+              data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
+            );
+          }
           startStatsPolling(data.session.session_id);
         } else if (!cancelled) {
           setStage("idle");
@@ -215,7 +239,7 @@ export default function CRDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [startClock, startStatsPolling]);
+  }, [startClock, startStatsPolling, stopRotationClock]);
 
   const handleStart = async () => {
     if (busyRef.current) return; // first click wins — no duplicate requests
@@ -240,14 +264,19 @@ export default function CRDashboard() {
       const data = await api.startAttendance(location.latitude, location.longitude, name);
       seenRef.current = new Set();
       setSession(data);
-      setQrLifetime(data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK);
+      setQrLifetime(isPermanentQr(data.qr) ? QR_LIFETIME_PERMANENT : (data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK));
       setSessionName("");
       setSummary(null);
       setStage("active");
-      startClock(
-        data.session_id,
-        data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
-      );
+      if (isPermanentQr(data.qr)) {
+        stopRotationClock();
+        setCountdown(0);
+      } else {
+        startClock(
+          data.session_id,
+          data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
+        );
+      }
       startStatsPolling(data.session_id);
     } catch (err) {
       setError(err.message);

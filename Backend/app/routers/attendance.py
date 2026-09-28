@@ -45,6 +45,13 @@ router = APIRouter(tags=["attendance"])
 
 
 def _session_info(session: dict) -> SessionInfo:
+    raw_lifetime = session.get("qr_lifetime_seconds")
+    # 0 is a valid Permanent lifetime; only fall back when the key is absent.
+    try:
+        lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS
+                    if raw_lifetime is None else int(raw_lifetime))
+    except (TypeError, ValueError):
+        lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
     return SessionInfo(
         session_id=session["session_id"],
         session_name=session.get("session_name", ""),
@@ -53,8 +60,7 @@ def _session_info(session: dict) -> SessionInfo:
         longitude=float(session.get("longitude", 0)),
         radius_meters=float(session.get("radius_meters", settings.ATTENDANCE_RADIUS_METERS)),
         status=session.get("status", "active"),
-        qr_lifetime_seconds=int(session.get("qr_lifetime_seconds")
-                                or settings.QR_TOKEN_LIFETIME_SECONDS),
+        qr_lifetime_seconds=lifetime,
         started_at=str(session.get("started_at", "")),
         ended_at=session.get("ended_at"),
     )
@@ -122,6 +128,18 @@ def refresh_qr(
     Every CR receives the SAME token until rotation, so all CRs show one QR.
     """
     qr = qr_service.get_current_qr(payload.session_id)
+    return QRRefreshResponse(success=True, qr=qr)
+
+
+@router.post("/qr/rotate", response_model=QRRefreshResponse)
+def rotate_qr(
+    payload: QRRefreshRequest,
+    cr: CurrentUser = Depends(require_cr),
+) -> QRRefreshResponse:
+    """CR-only manual refresh: immediately mint a NEW QR and invalidate the
+    previous one, regardless of its expiry. This is the control the Permanent
+    lifetime relies on (a Permanent QR otherwise never changes on its own)."""
+    qr = qr_service.rotate_qr_now(payload.session_id)
     return QRRefreshResponse(success=True, qr=qr)
 
 
