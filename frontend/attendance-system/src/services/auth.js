@@ -64,30 +64,43 @@ export function clearGoogleRedirectMarker() {
   }
 }
 
-export async function startGoogleSignIn() {
-  // Google sign-in via popup resolves IN-PAGE (no reload), so the AuthContext
-  // observer reports the new user directly and authorizes them with the
-  // backend. A redirect marker is intentionally NOT set: there is no full-page
-  // return to reconcile, keeping the sign-in state machine simple.
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-  return signInWithPopup(auth, provider);
+// ---- Platform-aware Google sign-in ----------------------------------------
+//
+// ONE Firebase Auth instance drives everything; this only chooses HOW to reach
+// Google. DESKTOP keeps the reliable in-page popup (it works and needs no page
+// reload — the AuthContext observer picks the user straight up). MOBILE uses
+// signInWithRedirect because iOS Safari and in-app browsers silently drop or
+// block the popup, leaving the app reporting signed-out. The redirect tears the
+// page down, so the in-flight marker + the parked /attendance URL below let the
+// app recover the user and resume the SAME attempt on the way back.
+export function isMobileDevice() {
+  if (typeof navigator === "undefined") return false;
+  const ua = navigator.userAgent || "";
+  // iPadOS 13+ Safari reports a desktop "Macintosh" UA but is touch-first, so
+  // maxTouchPoints is the reliable signal there. The UA tokens otherwise cover
+  // iPhone/iPad Safari and Android Chrome — one broad check, not one device.
+  const isIpadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  return /iPhone|iPad|iPod|Android|Mobile/i.test(ua) || isIpadOS;
 }
 
-// Original redirect-based Google sign-in, retained but NOT used during the
-// popup experiment. signInWithRedirect tears the page down and reloads it, so
-// the exact /attendance?token=… URL is parked beforehand and restored on the
-// return. Kept verbatim so the experiment is fully reversible.
-export function startGoogleSignInViaRedirect() {
+function newGoogleProvider() {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  return provider;
+}
+
+// Park the exact /attendance?token=… URL (or the plain resume path when an
+// attempt is already running) so the redirect return can continue it. Best
+// effort: a private-mode failure just means the student rescans the QR.
+function parkAttendanceReturn() {
   let attemptPresent = false;
   try {
     if (window.location.pathname === "/attendance") {
       attemptPresent = Boolean(loadAttendanceAttempt());
-      // With a live attempt there is no need to park the QR token again: the
-      // student returns to the plain attendance page and resumes the SAME
-      // attempt (re-scanning the QR is not required and must not restart the
-      // window). Without one (sign-in before scanning, or a lost tab) the full
-      // token URL is parked so the entry gateway can still run.
+      // With a live attempt the QR token has already proven entry: return to
+      // the plain attendance page and resume the SAME attempt (no rescan, and
+      // never restart the server-side window). Without one, park the full
+      // token URL so the entry gateway can still run on the way back.
       const resume = attemptPresent
         ? `${window.location.origin}/attendance`
         : window.location.search
@@ -101,18 +114,48 @@ export function startGoogleSignInViaRedirect() {
       }
     }
   } catch {
-    /* private mode etc. — worst case the student rescans the QR */
+    /* ignore — worst case the student rescans the QR */
   }
-  const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
-  // Set BEFORE the call: the navigation away can begin immediately, so nothing
-  // later in this page's lifetime could observe an un-marked trip to Google.
+  return attemptPresent;
+}
+
+// signInWithRedirect navigates away and the page reloads on Google's return,
+// so this promise normally never resolves in the calling page.
+async function runGoogleRedirect() {
+  const attemptPresent = parkAttendanceReturn();
+  // Mark BEFORE the call: navigation to Google can begin immediately, so a
+  // later page lifetime can never observe an un-marked trip and mistake the
+  // return for a fresh automatic sign-in (the redirect loop).
   markGoogleRedirectLeft();
-  authLog("starting Google redirect", {
+  authLog("sign-in method selected: redirect", {
     pathname: window.location.pathname,
     hasAttempt: attemptPresent,
   });
-  return signInWithRedirect(auth, provider);
+  authLog("redirect sign-in started");
+  return signInWithRedirect(auth, newGoogleProvider());
+}
+
+// The single entry point every screen uses (via AuthContext.login).
+export async function signInWithGoogle() {
+  if (isMobileDevice()) {
+    return runGoogleRedirect();
+  }
+  authLog("sign-in method selected: popup");
+  authLog("popup sign-in started");
+  try {
+    const result = await signInWithPopup(auth, newGoogleProvider());
+    authLog("popup sign-in completed");
+    return result;
+  } catch (err) {
+    // Only a GENUINELY blocked popup justifies escalating to a full-page
+    // redirect. A popup the user closed, or a duplicate in-flight popup
+    // request, must be surfaced instead (PART 9).
+    if (err?.code === "auth/popup-blocked") {
+      authLog("popup blocked; falling back to redirect");
+      return runGoogleRedirect();
+    }
+    throw err;
+  }
 }
 
 // Read-once + clear: a stale return URL must never fire at a later date.

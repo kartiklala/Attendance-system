@@ -11,8 +11,8 @@ import {
   getFirebaseIdToken,
   isReturningFromGoogleRedirect,
   observeAuthUser,
+  signInWithGoogle,
   signOutUser,
-  startGoogleSignIn,
   takeAttendanceReturnUrl,
 } from "../services/auth";
 import { authLog } from "../utils/authLog";
@@ -248,19 +248,25 @@ export function AuthProvider({ children }) {
     return unsubscribe;
   }, [decide]);
 
-  // Redirect flow: this kicks off navigation to Google and never resolves
-  // with a user — after the return reload the bootstrap effect above
-  // authorizes the signed-in account automatically.
+  // The single Google entry point. signInWithGoogle picks the mechanism by
+  // platform: DESKTOP popup (resolves IN-PAGE — the observer then fires with
+  // the user and `decide` authorizes them, no reload) and MOBILE redirect
+  // (navigates away; the bootstrap effect above consumes the return on reload).
+  // A blocked desktop popup transparently falls back to redirect inside
+  // signInWithGoogle; a popup the user merely closed is reported, not chased.
   const login = useCallback(async () => {
     setError(null);
     try {
-      await startGoogleSignIn();
+      await signInWithGoogle();
     } catch (err) {
-      const message =
-        err?.code === "auth/popup-closed-by-user"
+      const cancelled =
+        err?.code === "auth/popup-closed-by-user" ||
+        err?.code === "auth/cancelled-popup-request";
+      setError(
+        cancelled
           ? "Sign-in was cancelled."
-          : err?.message || "Sign-in failed. Please try again.";
-      setError(message);
+          : err?.message || "Sign-in failed. Please try again."
+      );
       throw err;
     }
   }, []);
