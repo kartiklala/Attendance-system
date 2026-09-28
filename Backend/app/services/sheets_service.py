@@ -26,12 +26,14 @@ _spreadsheet = None
 
 
 def _rgba(red: float, green: float, blue: float) -> dict:
-    """Google Sheets API color value (gspread passes format dicts through)."""
-    return {"red": red, "green": green, "blue": blue, "alpha": 1.0}
+    """Google Sheets API Color. Only red/green/blue are valid fields here — an
+    `alpha` key makes batchUpdate return HTTP 400, so it is never sent."""
+    return {"red": red, "green": green, "blue": blue}
 
 
-GREEN = _rgba(0.13, 0.55, 0.13)
-RED = _rgba(0.80, 0.12, 0.12)
+GREEN = _rgba(0.13, 0.55, 0.13)   # PRESENT background
+RED = _rgba(0.80, 0.12, 0.12)     # ABSENT background
+WHITE = _rgba(1.0, 1.0, 1.0)      # bold text on a coloured background
 
 
 def _get_client() -> gspread.Client:
@@ -187,10 +189,11 @@ def create_session_sheet(session_id: str, session_name: str,
                     "range": {"sheetId": sheet.id, "startColumnIndex": 0,
                               "endColumnIndex": 1},
                     "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
-                    "fields": "cell.userEnteredFormat.numberFormat",
+                    "fields": "userEnteredFormat.numberFormat",
                 }
             },
             {
+                # Header + every roster row, seeded with status ABSENT.
                 "updateCells": {
                     "range": {"sheetId": sheet.id},
                     "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}}
@@ -199,36 +202,36 @@ def create_session_sheet(session_id: str, session_name: str,
                 }
             },
             {
+                # Header row bold.
                 "repeatCell": {
                     "range": {"sheetId": sheet.id, "startRowIndex": 0, "endRowIndex": 1},
                     "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                    "fields": "cell.userEnteredFormat.textFormat.bold",
+                    "fields": "userEnteredFormat.textFormat",
                 }
             },
         ]
+        # Everyone starts ABSENT: paint the Status column (C2:C…) with a solid
+        # red background up-front. mark_student_present flips one cell to green
+        # the instant that student is recorded, so the tab reads red -> green
+        # exactly as required (no fragile conditional-format rules).
+        if roster:
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sheet.id, "startRowIndex": 1,
+                              "endRowIndex": 1 + len(roster),
+                              "startColumnIndex": 2, "endColumnIndex": 3},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": RED,
+                        "textFormat": {"bold": True, "foregroundColor": WHITE},
+                    }},
+                    "fields": "userEnteredFormat",
+                }
+            })
         # NOTE: Worksheet.batch_update() is gspread's *value-range* helper and
         # rewrites `data[i]["range"]`, so passing raw Sheets API request objects
         # (repeatCell/updateCells) raises KeyError: 'range'. Raw requests must go
         # through the spreadsheet-level batchUpdate endpoint instead.
         spreadsheet.batch_update({"requests": requests})
-        # Conditional formats via the native API (bold red ABSENT / green PRESENT).
-        sheet.format(
-            f"C2:C{max(len(roster) + 1, 2)}",
-            {
-                "conditionalFormats": [
-                    {
-                        "type": "textContains",
-                        "values": [f'"ABSENT"'],
-                        "format": {"textFormat": {"foregroundColor": RED, "bold": True}},
-                    },
-                    {
-                        "type": "textContains",
-                        "values": [f'"PRESENT"'],
-                        "format": {"textFormat": {"foregroundColor": GREEN, "bold": True}},
-                    },
-                ]
-            },
-        )
     except (GSpreadException, APIError):
         logger.exception("Could not create the session sheet title=%s", title)
         raise ServiceUnavailableError("Could not create the session Google Sheet.")
@@ -257,7 +260,8 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
     is unknown too does the service fall back to the MATCH formula lookup.
     """
     try:
-        sheet = _open_spreadsheet().worksheet(sheet_title)
+        spreadsheet = _open_spreadsheet()
+        sheet = spreadsheet.worksheet(sheet_title)
         target = row or _session_rows.get(sheet_title, {}).get(
             _norm_enrollment(enrollment_no)
         )
@@ -270,7 +274,25 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
                                sheet_title)
                 return
             target = int(float(raw))
-        sheet.update(f"C{int(target)}", [["PRESENT"]], value_input_option="RAW")
+        # Flip this student's Status cell to PRESENT AND paint its background
+        # green (from the seeded red) in a single spreadsheet-level batchUpdate.
+        target = int(target)
+        requests = [{
+            "updateCells": {
+                "range": {"sheetId": sheet.id,
+                          "startRowIndex": target - 1, "endRowIndex": target,
+                          "startColumnIndex": 2, "endColumnIndex": 3},
+                "rows": [{"values": [{
+                    "userEnteredValue": {"stringValue": "PRESENT"},
+                    "userEnteredFormat": {
+                        "backgroundColor": GREEN,
+                        "textFormat": {"bold": True, "foregroundColor": WHITE},
+                    },
+                }]}],
+                "fields": "userEnteredValue,userEnteredFormat",
+            }
+        }]
+        spreadsheet.batch_update({"requests": requests})
     except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):
