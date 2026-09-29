@@ -352,21 +352,54 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
         logger.exception("Could not mark PRESENT on the session sheet title=%s", sheet_title)
 
 
-def flag_proxy_remarks(sheet_title: str, enrollments: list[str]) -> None:
-    """Write REMARK_PROXY into the Remarks column (D) for every enrollment
-    given — all students sharing one device_hash (same browser + same IP).
+def _short_time(marked_at: str) -> str:
+    """HH:MM:SS (UTC) from a stored ISO timestamp; '' if it can't be parsed."""
+    if not marked_at:
+        return ""
+    try:
+        return datetime.fromisoformat(marked_at).strftime("%H:%M:%S")
+    except ValueError:
+        return ""
 
-    Called only when the backend has confirmed two or more distinct students on
-    that device_hash, so a shared Wi-Fi router (same IP, different browsers)
-    never triggers it. Best-effort: failures are logged, never raised upward."""
-    if not enrollments:
+
+def _proxy_group_label(device_hash: str) -> str:
+    """Short, stable id for one device (the leading hex of its device_hash), so
+    two different proxying devices are labelled distinctly in the sheet."""
+    return f"Device #{(device_hash or '')[:4].upper()}"
+
+
+def _proxy_remark(group_label: str, position: int, total: int,
+                  marked_at: str) -> str:
+    """One student's proxy remark: which device group, their order within it
+    (1 = first to mark), and the time. Example:
+    'Proxy detected · Device #3F9A · #1/2 @ 10:21:05'."""
+    time_text = _short_time(marked_at)
+    suffix = f" @ {time_text}" if time_text else ""
+    return f"{REMARK_PROXY} · {group_label} · #{position}/{total}{suffix}"
+
+
+def flag_proxy_remarks(sheet_title: str, device_hash: str,
+                       arrivals: list[tuple[str, str]]) -> None:
+    """Write an ordered, device-grouped proxy remark into the Remarks column (D)
+    for every student sharing one device_hash (same browser + same IP).
+
+    `arrivals` is (enrollment_no, marked_at) ordered oldest-first, so each row
+    carries its position within the group (who marked first vs second) plus the
+    group's short device id — which keeps two separate proxying devices (e.g.
+    dev1's pair vs dev2's pair) individually identifiable. Called only when the
+    backend confirmed two or more distinct students on that device_hash, so a
+    shared Wi-Fi router (same IP, different browsers) never triggers it.
+    Best-effort: failures are logged, never raised upward."""
+    if not arrivals:
         return
+    group_label = _proxy_group_label(device_hash)
+    total = len(arrivals)
     try:
         spreadsheet = _open_spreadsheet()
         sheet = spreadsheet.worksheet(sheet_title)
         requests = []
         seen_rows: set[int] = set()
-        for enrollment in enrollments:
+        for position, (enrollment, marked_at) in enumerate(arrivals, start=1):
             target = _resolve_row(sheet, sheet_title, enrollment)
             if target is None or target in seen_rows:
                 continue
@@ -377,7 +410,10 @@ def flag_proxy_remarks(sheet_title: str, enrollments: list[str]) -> None:
                               "startRowIndex": target - 1, "endRowIndex": target,
                               "startColumnIndex": 3, "endColumnIndex": 4},
                     "rows": [{"values": [{
-                        "userEnteredValue": {"stringValue": REMARK_PROXY},
+                        "userEnteredValue": {
+                            "stringValue": _proxy_remark(
+                                group_label, position, total, marked_at),
+                        },
                         "userEnteredFormat": {
                             "backgroundColor": AMBER,
                             "textFormat": {"bold": True},
@@ -388,8 +424,8 @@ def flag_proxy_remarks(sheet_title: str, enrollments: list[str]) -> None:
             })
         if requests:
             spreadsheet.batch_update({"requests": requests})
-            logger.info("Proxy remarks written title=%s rows=%s",
-                        sheet_title, len(requests))
+            logger.info("Proxy remarks written title=%s group=%s rows=%s",
+                        sheet_title, group_label, len(requests))
     except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):

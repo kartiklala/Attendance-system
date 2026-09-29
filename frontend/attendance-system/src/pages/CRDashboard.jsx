@@ -29,6 +29,33 @@ const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
 const isPermanentQr = (qr) =>
   !!qr && (qr.is_permanent === true || qr.expires_in_seconds === 0);
 
+// Live "Students Present" panel: how many rows to show before "View all", and
+// how long a freshly-arrived row keeps its highlight. Both are display-only —
+// the list itself is driven by the SAME /stats poll as the water-fill (no extra
+// request, no second timer).
+const PRESENT_PREVIEW_COUNT = 6;
+const PRESENT_HIGHLIGHT_MS = 2800;
+
+// Server stores marked_at as a UTC ISO string; show it as a short local time.
+const formatMarkedTime = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+};
+
+// Ellipsize a string so it fits a canvas width, using the CURRENT ctx.font.
+// Used when compositing the downloadable QR image (session names vary in length).
+function fitText(ctx, text, maxWidth) {
+  const value = String(text ?? "");
+  if (ctx.measureText(value).width <= maxWidth) return value;
+  let truncated = value;
+  while (truncated.length > 1 && ctx.measureText(`${truncated}…`).width > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+  return `${truncated.trimEnd()}…`;
+}
+
 // Absentee CSV (backend-verified data). Quoted fields + BOM so enrollment
 // numbers with leading zeros open correctly in Excel.
 function downloadAbsenteeCSV(summary) {
@@ -67,11 +94,18 @@ export default function CRDashboard() {
   const [lifetimeNotice, setLifetimeNotice] = useState(null);
   const [qrRefreshing, setQrRefreshing] = useState(false); // manual QR refresh
   const [copied, setCopied] = useState(false); // "Copied!" on the absentee list
+  const [presentCopied, setPresentCopied] = useState(false); // "Copied!" on the present list
+  const qrFrameRef = useRef(null); // wraps the QR canvas, read when downloading
   const timerRef = useRef(null);
   const tickRef = useRef(0);
   const statsRef = useRef(null);
   const seenRef = useRef(new Set()); // recent-events already popped up
   const busyRef = useRef(false);     // blocks duplicate async invocations
+  // Live "Students Present" panel state (driven by the existing /stats poll).
+  const [showAllPresent, setShowAllPresent] = useState(false);
+  const [highlighted, setHighlighted] = useState(() => new Set()); // enrollments
+  const knownEnrollRef = useRef(new Set()); // enrollments already listed
+  const presentInitRef = useRef(false); // first batch seeded without animating
 
   const stopClock = useCallback(() => {
     if (timerRef.current) {
@@ -105,6 +139,10 @@ export default function CRDashboard() {
     }
     setSession(null);
     setStats(null);
+    knownEnrollRef.current = new Set();
+    presentInitRef.current = false;
+    setHighlighted(new Set());
+    setShowAllPresent(false);
     setStage("ended");
   }, [stopClock]);
 
@@ -118,6 +156,30 @@ export default function CRDashboard() {
           const s = data.stats;
           setStats(s);
           setError(null);
+          // Reuse this same response to flag newly-arrived students in the
+          // "Students Present" panel — enrollment is the unique key, so a
+          // student can never be listed (or highlighted) twice. The very first
+          // batch is seeded silently so an open session doesn't animate wholesale.
+          const attendees = s.attendees || [];
+          if (!presentInitRef.current) {
+            attendees.forEach((a) => a.enrollment_no && knownEnrollRef.current.add(a.enrollment_no));
+            presentInitRef.current = true;
+          } else {
+            const fresh = attendees
+              .map((a) => a.enrollment_no)
+              .filter((e) => e && !knownEnrollRef.current.has(e));
+            if (fresh.length) {
+              fresh.forEach((e) => knownEnrollRef.current.add(e));
+              setHighlighted((prev) => new Set([...prev, ...fresh]));
+              setTimeout(() => {
+                setHighlighted((prev) => {
+                  const next = new Set(prev);
+                  fresh.forEach((e) => next.delete(e));
+                  return next;
+                });
+              }, PRESENT_HIGHLIGHT_MS);
+            }
+          }
           if (s.session_status !== "active") {
             // Another CR ended the shared session — reflect it everywhere.
             await showFinalSummary(sessionId);
@@ -265,6 +327,10 @@ export default function CRDashboard() {
       const location = await getCurrentLocation();
       const data = await api.startAttendance(location.latitude, location.longitude, name);
       seenRef.current = new Set();
+      knownEnrollRef.current = new Set();
+      presentInitRef.current = false;
+      setHighlighted(new Set());
+      setShowAllPresent(false);
       setSession(data);
       setQrLifetime(isPermanentQr(data.qr) ? QR_LIFETIME_PERMANENT : (data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK));
       setSessionName("");
@@ -373,6 +439,10 @@ export default function CRDashboard() {
       setSession(null);
       setStats(null);
       setPopups([]);
+      knownEnrollRef.current = new Set();
+      presentInitRef.current = false;
+      setHighlighted(new Set());
+      setShowAllPresent(false);
       setStage("ended");
     } catch (err) {
       setError(err.message);
@@ -421,6 +491,123 @@ export default function CRDashboard() {
           <p key={w}>{w}</p>
         ))}
       </div>
+    );
+  };
+
+  // Live "Students Present" panel. Rendered entirely from the SAME /stats
+  // response that drives the water-fill — no separate request, no second timer.
+  // Most recent arrival is on top; new arrivals get a one-off highlight.
+  const renderAttendees = () => {
+    if (!stats) {
+      return (
+        <section className="present-panel" aria-busy="true">
+          <header className="present-panel-head">
+            <h3 className="present-panel-title">Students Present</h3>
+            <span className="present-live">
+              <span className="present-live-dot" aria-hidden="true" />Live
+            </span>
+          </header>
+          <p className="present-loading">Loading attendance…</p>
+        </section>
+      );
+    }
+    const attendees = stats.attendees || [];
+    const present = stats.present_count ?? attendees.length;
+    const total = stats.total_students ?? 0;
+    const collapsed = attendees.slice(0, PRESENT_PREVIEW_COUNT);
+    const rows = showAllPresent ? attendees : collapsed;
+    return (
+      <section className="present-panel" aria-live="polite">
+        <header className="present-panel-head">
+          <h3 className="present-panel-title">Students Present</h3>
+          <div className="present-panel-meta">
+            <span className="present-live">
+              <span className="present-live-dot" aria-hidden="true" />Live
+            </span>
+            <span className="present-panel-count">
+              {present} / {total}
+            </span>
+            <button
+              type="button"
+              className="btn btn-ghost present-copy-btn"
+              onClick={copyPresentList}
+              disabled={attendees.length === 0}
+              title={presentCopied ? "Copied!" : "Copy the students-present list"}
+              aria-label="Copy the students-present list"
+            >
+              {presentCopied ? (
+                <svg
+                  className="btn-icon"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M20 6 9 17l-5-5" />
+                </svg>
+              ) : (
+                <svg
+                  className="btn-icon"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <rect x="9" y="9" width="11" height="11" rx="2" />
+                  <path d="M5 15V5a2 2 0 0 1 2-2h10" />
+                </svg>
+              )}
+              {presentCopied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        </header>
+
+        {attendees.length === 0 ? (
+          <div className="present-empty">
+            <p className="present-empty-title">No students have marked yet.</p>
+            <p className="present-empty-sub">They will appear here as they scan the QR.</p>
+          </div>
+        ) : (
+          <>
+            <ul className="present-list">
+              {rows.map((a, i) => (
+                <li
+                  key={a.enrollment_no || `${a.name}-${a.marked_at}-${i}`}
+                  className={
+                    highlighted.has(a.enrollment_no)
+                      ? "present-row present-row-new"
+                      : "present-row"
+                  }
+                >
+                  <span className="present-row-idx">{i + 1}</span>
+                  <span className="present-row-name">{a.name || "Student"}</span>
+                  <span className="present-row-enroll">{a.enrollment_no}</span>
+                  <span className="present-row-time">{formatMarkedTime(a.marked_at)}</span>
+                </li>
+              ))}
+            </ul>
+            {attendees.length > PRESENT_PREVIEW_COUNT && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-small present-toggle"
+                onClick={() => setShowAllPresent((v) => !v)}
+              >
+                {showAllPresent ? "Show less" : `View all (${attendees.length})`}
+              </button>
+            )}
+          </>
+        )}
+      </section>
     );
   };
 
@@ -474,6 +661,97 @@ export default function CRDashboard() {
     } catch {
       setError("Could not copy to the clipboard on this device.");
     }
+  };
+
+  // Copy the live "Students Present" list (ranked, with enrollment + time) so
+  // the CR can paste it elsewhere. Built entirely from the current /stats data.
+  const copyPresentList = async () => {
+    const attendees = stats?.attendees || [];
+    if (attendees.length === 0) {
+      setError("No students have marked attendance yet to copy.");
+      return;
+    }
+    const heading = `Students Present (${stats.present_count ?? attendees.length}/${
+      stats.total_students ?? attendees.length
+    }) — ${stats?.session_name || session?.session_name || "Session"}`;
+    const lines = attendees.map(
+      (a, i) =>
+        `${i + 1}. ${a.name || "Student"}\t${a.enrollment_no || ""}\t${formatMarkedTime(a.marked_at)}`
+    );
+    try {
+      await navigator.clipboard.writeText([heading, ...lines].join("\n"));
+      setPresentCopied(true);
+      setTimeout(() => setPresentCopied(false), 2000);
+    } catch {
+      setError("Could not copy to the clipboard on this device.");
+    }
+  };
+
+  // Render the QR to a PNG card that also shows the session title + name, then
+  // download it. The QR canvas on screen is composited onto a fresh canvas so
+  // the saved image is self-describing (not just a bare code).
+  const handleDownloadQR = () => {
+    const source = qrFrameRef.current?.querySelector("canvas");
+    if (!source || !session?.qr) {
+      setError("The QR code is not ready to download yet.");
+      return;
+    }
+    const name = stats?.session_name || session?.session_name || "Session";
+    const scale = 2; // 2x for a crisp image
+    const W = 360;
+    const PAD = 28;
+    const QR = 224;
+    const titleH = 30;
+    const nameH = 26;
+    const footerH = 22;
+    const gap = 18;
+    const H = PAD + titleH + gap + nameH + gap + QR + gap + footerH + PAD;
+
+    const out = document.createElement("canvas");
+    out.width = W * scale;
+    out.height = H * scale;
+    const ctx = out.getContext("2d");
+    if (!ctx) {
+      setError("Could not create the QR image on this device.");
+      return;
+    }
+    ctx.scale(scale, scale);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    // Background + thin navy→gold top accent bar (matches the on-screen card).
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#123a66";
+    ctx.fillRect(0, 0, W, 6);
+
+    // Title.
+    ctx.fillStyle = "#0d2f57";
+    ctx.font = "bold 20px system-ui, -apple-system, Segoe UI, Arial, sans-serif";
+    ctx.fillText("Attendance Session Active", W / 2, PAD + titleH / 2);
+
+    // Session name (ellipsized to fit).
+    ctx.fillStyle = "#17497f";
+    ctx.font = "600 17px system-ui, -apple-system, Segoe UI, Arial, sans-serif";
+    const nameY = PAD + titleH + gap + nameH / 2;
+    ctx.fillText(fitText(ctx, name, W - PAD * 2), W / 2, nameY);
+
+    // QR (centered, scaled from the live canvas).
+    const qrX = (W - QR) / 2;
+    const qrY = PAD + titleH + gap + nameH + gap;
+    ctx.drawImage(source, qrX, qrY, QR, QR);
+
+    // Footer: session id.
+    ctx.fillStyle = "#5c6b7d";
+    ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+    const footerY = qrY + QR + gap + footerH / 2;
+    ctx.fillText(fitText(ctx, `Session ID: ${session.session_id}`, W - PAD * 2), W / 2, footerY);
+
+    const link = document.createElement("a");
+    link.href = out.toDataURL("image/png");
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || session.session_id;
+    link.download = `attendance-qr-${slug}.png`;
+    link.click();
   };
 
   const renderSummary = () => {
@@ -633,8 +911,34 @@ export default function CRDashboard() {
               {(stats?.session_name || session.session_name) && (
                 <p className="session-name">{stats?.session_name || session.session_name}</p>
               )}
-              <div className="qr-frame">
+              <div className="qr-frame" ref={qrFrameRef}>
                 <QRCodeCanvas value={session.qr.qr_url} size={224} marginSize={2} />
+              </div>
+              <div className="qr-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-small qr-download-btn"
+                  onClick={handleDownloadQR}
+                  title="Download the QR code as an image"
+                >
+                  <svg
+                    className="btn-icon"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 3v12" />
+                    <path d="M7 10l5 5 5-5" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  Download QR
+                </button>
               </div>
               {renderLiveStats()}
               {renderWarnings()}
@@ -685,6 +989,7 @@ export default function CRDashboard() {
                 <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
               )}
               <p className="session-id muted">Session ID: {session.session_id}</p>
+              {renderAttendees()}
               <button
                 className="btn btn-danger btn-large"
                 onClick={handleEnd}

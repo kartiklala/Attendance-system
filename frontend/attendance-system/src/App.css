@@ -474,6 +474,35 @@ form input:focus-visible,
   border-radius: 6px;
 }
 
+/* Row under the QR: the download-as-image action, kept centred and compact. */
+.qr-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 4px;
+}
+
+.qr-download-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* Small inline SVG glyph inside a button, aligned with its label. */
+.btn-icon {
+  flex-shrink: 0;
+  vertical-align: -2px;
+}
+
+/* Copy action in the "Students Present" header: compact icon + label. */
+.present-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  font-size: 0.78rem;
+  line-height: 1;
+}
+
 .session-status {
   margin: 0;
   font-weight: 700;
@@ -1351,6 +1380,189 @@ form input:focus-visible,
 
   .admin-add-form .btn {
     width: 100%;
+  }
+}
+
+/* ---- Live "Students Present" panel (CR dashboard) ------------------------ */
+.present-panel {
+  width: 100%;
+  margin-top: 6px;
+  padding: 14px 16px 16px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.present-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.present-panel-title {
+  margin: 0;
+  font-family: var(--font-head);
+  font-size: 1.02rem;
+  color: var(--navy-800);
+}
+
+.present-panel-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.present-panel-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: var(--navy-700);
+}
+
+.present-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.present-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2fa84f;
+  box-shadow: 0 0 0 0 rgba(47, 168, 79, 0.5);
+  animation: present-pulse 2s ease-out infinite;
+}
+
+@keyframes present-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(47, 168, 79, 0.5); }
+  70% { box-shadow: 0 0 0 6px rgba(47, 168, 79, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(47, 168, 79, 0); }
+}
+
+.present-loading {
+  margin: 4px 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.present-empty {
+  padding: 18px 12px;
+  text-align: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.present-empty-title {
+  margin: 0 0 4px;
+  font-weight: 600;
+  color: var(--navy-800);
+}
+
+.present-empty-sub {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.present-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.present-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.present-row-idx {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-align: center;
+}
+
+.present-row-name {
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.present-row-enroll {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.82rem;
+  color: var(--navy-600);
+}
+
+.present-row-time {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  color: var(--muted);
+  justify-self: end;
+}
+
+/* One-off entrance for a freshly-detected arrival (only new rows animate). */
+.present-row-new {
+  animation: present-in 0.5s ease-out;
+  border-color: var(--gold-400);
+  background: var(--gold-soft);
+}
+
+@keyframes present-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.present-toggle {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+}
+
+/* Mobile: keep the QR prominent and stack each student into a compact
+   two-line card (name on top, enrollment + time below) instead of a wide
+   four-column table row. */
+@media (max-width: 480px) {
+  .present-panel {
+    padding: 12px 12px 14px;
+  }
+
+  .present-row {
+    grid-template-columns: 22px minmax(0, 1fr);
+    grid-template-areas:
+      "idx name"
+      ".    enroll";
+    row-gap: 2px;
+    column-gap: 8px;
+    padding: 9px 10px;
+  }
+
+  .present-row-idx { grid-area: idx; }
+  .present-row-name { grid-area: name; }
+  .present-row-enroll { grid-area: enroll; justify-self: start; }
+  .present-row-time {
+    grid-area: enroll;
+    justify-self: end;
   }
 }
 

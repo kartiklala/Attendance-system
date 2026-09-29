@@ -112,6 +112,18 @@ class PresentEvent(BaseModel):
     photo_url: str = ""
 
 
+class AttendeeEntry(BaseModel):
+    """One row in the CR's live 'Students Present' list.
+
+    Carries the enrollment number (the `recent` popup deliberately does not),
+    so the CR can confirm WHO has marked — not just how many. Only the three
+    fields the CR needs are exposed; no IP/device/location data rides along.
+    """
+    name: str
+    enrollment_no: str
+    marked_at: str
+
+
 class SessionStats(BaseModel):
     session_id: str
     session_name: str = ""
@@ -120,6 +132,10 @@ class SessionStats(BaseModel):
     present_count: int
     percentage: float
     recent: list[PresentEvent] = []
+    # Full present list for THIS session (most recent first) for the CR's live
+    # 'Students Present' panel. Reuses the same poll as `recent` — no extra
+    # request. Bounded by class size, so the payload stays small.
+    attendees: list[AttendeeEntry] = []
     # Human-readable proxy-attendance flags ("⚠ Multiple students…").
     # Raw IP/device data is never exposed here.
     warnings: list[str] = []

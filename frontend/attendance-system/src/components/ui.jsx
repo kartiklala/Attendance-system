@@ -1,5 +1,5 @@
 // Small shared UI building blocks.
-import logoUrl from "../assets/attendiffy.jpg";
+import logoUrl from "../assets/attendify1.jpg";
 
 // Attendiffy circular badge, cropped to the navy emblem. Visual branding only.
 export function BrandMark({ size = 56, className = "" }) {

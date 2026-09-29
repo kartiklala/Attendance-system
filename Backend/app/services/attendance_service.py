@@ -73,8 +73,9 @@ def _present_flip_best_effort(sheet_title: str, enrollment_no: str) -> None:
         logger.exception("Could not update the session sheet tab %s", sheet_title)
 
 
-def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
-    """Enrollments already recorded this session on the SAME device_hash.
+def _same_device_arrivals(session_id: str, device_hash: str) -> list[tuple[str, str]]:
+    """(enrollment_no, marked_at) for every attendance recorded this session on
+    the SAME device_hash, ordered OLDEST-FIRST (the order they actually marked).
 
     device_hash is sha256(client_ip + user_agent), so a match means the same
     browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
@@ -88,19 +89,23 @@ def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
         .where("device_hash", "==", device_hash)
         .stream()
     )
-    enrollments = []
+    arrivals: list[tuple[str, str]] = []
     for doc in docs:
-        enrollment = (doc.to_dict() or {}).get("enrollment_no", "")
+        data = doc.to_dict() or {}
+        enrollment = data.get("enrollment_no", "")
         if enrollment:
-            enrollments.append(enrollment)
-    return enrollments
+            arrivals.append((enrollment, str(data.get("marked_at", ""))))
+    # Oldest-first so the sheet can show who marked first vs later.
+    arrivals.sort(key=lambda item: item[1])
+    return arrivals
 
 
-def _proxy_flag_best_effort(sheet_title: str, enrollments: list[str]) -> None:
+def _proxy_flag_best_effort(sheet_title: str, device_hash: str,
+                            arrivals: list[tuple[str, str]]) -> None:
     """Cosmetic proxy remark on the session tab: never blocks or fails the
     student. Best-effort like the PRESENT flip."""
     try:
-        sheets_service.flag_proxy_remarks(sheet_title, enrollments)
+        sheets_service.flag_proxy_remarks(sheet_title, device_hash, arrivals)
     except Exception:
         logger.exception("Could not write proxy remarks on the session sheet tab %s",
                          sheet_title)
@@ -109,13 +114,16 @@ def _proxy_flag_best_effort(sheet_title: str, enrollments: list[str]) -> None:
 def _proxy_check_and_flag_best_effort(sheet_title: str, session_id: str,
                                       device_hash: str) -> None:
     """After a successful mark, flag EVERY student sharing this device_hash
-    (same browser + same IP) once two or more have used it. Runs as a background
-    task so the extra read never delays the student's response."""
+    (same browser + same IP) once two or more have used it. Each remark records
+    the device group and the student's order-of-arrival, so two different
+    devices that each proxied (e.g. dev1's pair vs dev2's pair) stay separately
+    identifiable and the first marker is distinguishable from the second. Runs
+    as a background task so the extra read never delays the student's response."""
     if not sheet_title or not device_hash:
         return
-    group = _same_device_enrollments(session_id, device_hash)
-    if len(group) > 1:
-        _proxy_flag_best_effort(sheet_title, group)
+    arrivals = _same_device_arrivals(session_id, device_hash)
+    if len(arrivals) > 1:
+        _proxy_flag_best_effort(sheet_title, device_hash, arrivals)
 
 
 def mark_attendance(student_uid: str, payload, client: dict | None = None,
@@ -330,6 +338,19 @@ def get_session_stats(session_id: str) -> dict:
         }
         for d in entries[:10]
     ]
+    # Full present list for the CR's live 'Students Present' panel. Built from
+    # the SAME in-memory `entries` (already filtered to this session and sorted
+    # most-recent-first) — no additional query. Enrollment is included here (it
+    # is intentionally omitted from the popup `recent`), so the CR can verify
+    # exactly who marked; no IP/device/location data is exposed.
+    attendees = [
+        {
+            "name": d.get("name", ""),
+            "enrollment_no": str(d.get("enrollment_no", "")),
+            "marked_at": str(d.get("marked_at", "")),
+        }
+        for d in entries
+    ]
 
     percentage = round((present_count / total) * 100, 2) if total else 0.0
     return {
@@ -340,6 +361,7 @@ def get_session_stats(session_id: str) -> dict:
         "present_count": present_count,
         "percentage": percentage,
         "recent": recent,
+        "attendees": attendees,
         "warnings": _proxy_warnings(entries),
     }
 
