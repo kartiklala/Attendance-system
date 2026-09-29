@@ -72,6 +72,51 @@ def _present_flip_best_effort(sheet_title: str, enrollment_no: str) -> None:
         logger.exception("Could not update the session sheet tab %s", sheet_title)
 
 
+def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
+    """Enrollments already recorded this session on the SAME device_hash.
+
+    device_hash is sha256(client_ip + user_agent), so a match means the same
+    browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
+    filters need no composite index. Includes the just-written record."""
+    if not device_hash:
+        return []
+    docs = (
+        get_db()
+        .collection(COLLECTION_ATTENDANCE)
+        .where("session_id", "==", session_id)
+        .where("device_hash", "==", device_hash)
+        .stream()
+    )
+    enrollments = []
+    for doc in docs:
+        enrollment = (doc.to_dict() or {}).get("enrollment_no", "")
+        if enrollment:
+            enrollments.append(enrollment)
+    return enrollments
+
+
+def _proxy_flag_best_effort(sheet_title: str, enrollments: list[str]) -> None:
+    """Cosmetic proxy remark on the session tab: never blocks or fails the
+    student. Best-effort like the PRESENT flip."""
+    try:
+        sheets_service.flag_proxy_remarks(sheet_title, enrollments)
+    except Exception:
+        logger.exception("Could not write proxy remarks on the session sheet tab %s",
+                         sheet_title)
+
+
+def _proxy_check_and_flag_best_effort(sheet_title: str, session_id: str,
+                                      device_hash: str) -> None:
+    """After a successful mark, flag EVERY student sharing this device_hash
+    (same browser + same IP) once two or more have used it. Runs as a background
+    task so the extra read never delays the student's response."""
+    if not sheet_title or not device_hash:
+        return
+    group = _same_device_enrollments(session_id, device_hash)
+    if len(group) > 1:
+        _proxy_flag_best_effort(sheet_title, group)
+
+
 def mark_attendance(student_uid: str, payload, client: dict | None = None,
                    background=None) -> dict:
     """Validate everything and mark the student PRESENT.
@@ -189,6 +234,17 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
                                 roster_enrollment)
         else:
             _present_flip_best_effort(sheet_title, roster_enrollment)
+
+    # Proxy remarks: flag every student sharing this device_hash (same browser
+    # + same IP) once two or more have marked. A shared IP alone (one Wi-Fi
+    # router, different browsers) never triggers it — device_hash includes the
+    # user-agent too.
+    if sheet_title and device_hash:
+        if background is not None:
+            background.add_task(_proxy_check_and_flag_best_effort, sheet_title,
+                                session_id, device_hash)
+        else:
+            _proxy_check_and_flag_best_effort(sheet_title, session_id, device_hash)
 
     logger.info("Attendance successful session_id=%s distance=%.1fm pipeline_ms=%s",
                 session_id, distance, int((time.monotonic() - started) * 1000))
