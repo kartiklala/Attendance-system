@@ -155,6 +155,19 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         except Exception:
             logger.exception("Could not update the session sheet tab %s",
                              sheet_title)
+        # Maintain the session tab's Remarks column (cosmetic, best-effort):
+        # when two or more DISTINCT students share this device_hash (same
+        # browser + same IP — never merely a shared Wi-Fi router), flag every
+        # enrollment in that group. Runs after the record is committed, so the
+        # query includes the attendance just written.
+        if device_hash:
+            try:
+                group = _same_device_enrollments(session_id, device_hash)
+                if len(group) > 1:
+                    sheets_service.flag_proxy_remarks(sheet_title, group)
+            except Exception:
+                logger.exception("Could not write proxy remarks on the session sheet tab %s",
+                                 sheet_title)
 
     logger.info("Attendance successful session_id=%s distance=%.1fm",
                 session_id, distance)
@@ -187,6 +200,29 @@ def _uid_already_marked(session_id: str, student_uid: str) -> bool:
         .stream()
     )
     return any(True for _ in docs)
+
+
+def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
+    """Enrollments already recorded this session on the SAME device_hash.
+
+    device_hash is sha256(client_ip + user_agent), so a match means the same
+    browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
+    filter needs no composite index. Includes the just-written record."""
+    if not device_hash:
+        return []
+    docs = (
+        get_db()
+        .collection(COLLECTION_ATTENDANCE)
+        .where("session_id", "==", session_id)
+        .where("device_hash", "==", device_hash)
+        .stream()
+    )
+    enrollments: list[str] = []
+    for doc in docs:
+        enrollment = str((doc.to_dict() or {}).get("enrollment_no", "")).strip()
+        if enrollment:
+            enrollments.append(enrollment)
+    return enrollments
 
 
 # ---- Live statistics (water fill + present popups + proxy warnings) --------

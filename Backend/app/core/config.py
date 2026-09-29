@@ -55,6 +55,9 @@ class Settings:
     GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_SHEET_NAME: str = os.getenv("GOOGLE_SHEET_NAME", "Attendance")
     GOOGLE_STUDENTS_SHEET_NAME: str = os.getenv("GOOGLE_STUDENTS_SHEET_NAME", "Sheet1")
+    # Bound each Sheets HTTP call so a slow read fails fast (and the roster
+    # cache can serve stale) instead of hanging the request until the OS drops it.
+    SHEETS_TIMEOUT_SECONDS: float = _float("SHEETS_TIMEOUT_SECONDS", 8)
 
     @property
     def is_production(self) -> bool:

@@ -6,8 +6,9 @@ Worksheets inside the configured spreadsheet:
 - settings.GOOGLE_SHEET_NAME: attendance log
   (columns: Timestamp | Enrollment No | Student Name | Status | Session-ID)
 - one worksheet PER SESSION (created on session start): a copy of the roster
-  with a Status column, ABSENT/red initially and PRESENT/green once the
-  backend records valid attendance.
+  with a Status column (ABSENT/red initially, PRESENT/green once the backend
+  records valid attendance) and a Remarks column (blank normally, "Proxy
+  detected" when the same browser + same IP marks two or more students).
 """
 import logging
 import re
@@ -26,12 +27,20 @@ _spreadsheet = None
 
 
 def _rgba(red: float, green: float, blue: float) -> dict:
-    """Google Sheets API color value (gspread passes format dicts through)."""
-    return {"red": red, "green": green, "blue": blue, "alpha": 1.0}
+    """Google Sheets API Color. Only red/green/blue are valid fields here — an
+    `alpha` key makes batchUpdate return HTTP 400, so it is never sent."""
+    return {"red": red, "green": green, "blue": blue}
 
 
-GREEN = _rgba(0.13, 0.55, 0.13)
-RED = _rgba(0.80, 0.12, 0.12)
+GREEN = _rgba(0.13, 0.55, 0.13)   # PRESENT background
+RED = _rgba(0.80, 0.12, 0.12)     # ABSENT background
+WHITE = _rgba(1.0, 1.0, 1.0)      # bold text on a coloured background
+AMBER = _rgba(0.98, 0.75, 0.14)   # Remarks background for a proxy flag
+
+# Remark text written next to a student's name when their attendance looks
+# proxied. Triggered ONLY by a shared device_hash (same IP + same browser),
+# never by a shared IP alone — a whole class on one Wi-Fi router is legitimate.
+REMARK_PROXY = "Proxy detected"
 
 
 def _get_client() -> gspread.Client:
@@ -46,6 +55,13 @@ def _get_client() -> gspread.Client:
         raise ServiceUnavailableError("Google Sheets credentials not found.")
     try:
         _client = gspread.service_account(filename=str(resolved))
+        # Bound every Sheets HTTP read (shared http_client) so a slow
+        # sheets.googleapis.com call fails fast (ReadTimeout) instead of
+        # hanging until the OS drops it; _get_roster then serves stale data.
+        try:
+            _client.set_timeout(settings.SHEETS_TIMEOUT_SECONDS)
+        except Exception:
+            logger.warning("Could not set Google Sheets timeout; using default")
         return _client
     except Exception:
         logger.exception("Failed to open Google Sheets service account")
@@ -82,8 +98,8 @@ def ensure_attendance_headers() -> None:
     values = sheet.get_values("A1:E1")
     if not values or not values[0] or not values[0][0]:
         sheet.update(
-            "A1:E1",
-            [["Timestamp", "Enrollment No", "Student Name", "Status", "Session-ID"]],
+            range_name="A1:E1",
+            values=[["Timestamp", "Enrollment No", "Student Name", "Status", "Session-ID"]],
         )
 
 
@@ -114,12 +130,27 @@ def fetch_student_roster() -> list[tuple[str, str]]:
 
 # ---- Per-session worksheets -----------------------------------------------
 #
-# One tab per attendance session: "Enrollment ID | Student Name | Status".
-# Sheet1 stays the untouched master roster. These calls are best-effort from
-# the session/attendance services — Firestore remains the source of truth.
+# One tab per attendance session:
+# "Enrollment ID | Student Name | Status | Remarks". Sheet1 stays the untouched
+# master roster. Remarks is blank normally and gets a "Proxy detected" flag when
+# the same browser + same IP marks two or more students. These calls are
+# best-effort from the session/attendance services — Firestore is the source.
 
 _SESSION_SHEET_PREFIX = "ATT_"
 _UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
+
+# sheet_title -> {normalized enrollment: 1-based worksheet row}, remembered when
+# a tab is seeded. The tab IS the roster order, so this map is exact: every
+# student marked present in the same process avoids a full-column read against
+# the Sheets API. It is an optimization only — an unknown title (e.g. after a
+# server restart) simply falls back to a column-A value search.
+_session_rows: dict[str, dict[str, int]] = {}
+_SESSION_ROW_CACHE_MAX = 25
+
+
+def _norm_enrollment(value: str) -> str:
+    """Whitespace-free comparison key (mirrors student_service)."""
+    return re.sub(r"\s+", "", str(value or ""))
 
 
 def session_sheet_title(session_id: str, session_name: str) -> str:
@@ -130,31 +161,39 @@ def session_sheet_title(session_id: str, session_name: str) -> str:
     return f"{_SESSION_SHEET_PREFIX}{short_id}_{suffix}"[:100]
 
 
-def create_session_sheet(session_id: str, session_name: str) -> str:
+def create_session_sheet(session_id: str, session_name: str,
+                         roster: list[tuple[str, str]] | None = None) -> str:
     """Create (or reuse) the session worksheet seeded with everyone ABSENT.
 
     Returns the worksheet title. Enrollment numbers are written as TEXT so
     leading zeros survive; PRESENT/ABSENT colours are conditional formats so
     later status updates re-colour automatically.
+
+    `roster` may be supplied by the caller (the process-cached Sheet1 read) to
+    avoid downloading the roster a second time for the same session start.
     """
     spreadsheet = _open_spreadsheet()
-    roster = fetch_student_roster()
+    if roster is None:
+        roster = fetch_student_roster()
     title = session_sheet_title(session_id, session_name)
 
-    # Idempotent: an existing tab (retry / duplicate submit) is reused as-is.
+    # Idempotent: an existing tab (retry / duplicate submit) is reused, and a
+    # tab created before the Remarks column existed is upgraded so the column
+    # is always present for this session.
     try:
-        spreadsheet.worksheet(title)
+        existing = spreadsheet.worksheet(title)
         logger.info("Session sheet already exists title=%s", title)
+        _ensure_remarks_column(existing)
         return title
     except gspread.WorksheetNotFound:
         pass
 
     try:
         sheet = spreadsheet.add_worksheet(
-            title=title, rows=max(len(roster) + 1, 2), cols=3
+            title=title, rows=max(len(roster) + 1, 2), cols=4
         )
-        body = [["Enrollment ID", "Student Name", "Status"]]
-        body += [[enr, name, "ABSENT"] for enr, name in roster]
+        body = [["Enrollment ID", "Student Name", "Status", "Remarks"]]
+        body += [[enr, name, "ABSENT", ""] for enr, name in roster]
         requests = [
             {
                 # Column A as plain text protects leading zeros.
@@ -162,10 +201,11 @@ def create_session_sheet(session_id: str, session_name: str) -> str:
                     "range": {"sheetId": sheet.id, "startColumnIndex": 0,
                               "endColumnIndex": 1},
                     "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
-                    "fields": "cell.userEnteredFormat.numberFormat",
+                    "fields": "userEnteredFormat.numberFormat",
                 }
             },
             {
+                # Header + every roster row, seeded with status ABSENT.
                 "updateCells": {
                     "range": {"sheetId": sheet.id},
                     "rows": [{"values": [{"userEnteredValue": {"stringValue": str(v)}}
@@ -174,53 +214,184 @@ def create_session_sheet(session_id: str, session_name: str) -> str:
                 }
             },
             {
+                # Header row bold.
                 "repeatCell": {
                     "range": {"sheetId": sheet.id, "startRowIndex": 0, "endRowIndex": 1},
                     "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-                    "fields": "cell.userEnteredFormat.textFormat.bold",
+                    "fields": "userEnteredFormat.textFormat",
                 }
             },
         ]
-        sheet.batch_update(requests)
-        # Conditional formats via the native API (bold red ABSENT / green PRESENT).
-        sheet.format(
-            f"C2:C{max(len(roster) + 1, 2)}",
-            {
-                "conditionalFormats": [
-                    {
-                        "type": "textContains",
-                        "values": [f'"ABSENT"'],
-                        "format": {"textFormat": {"foregroundColor": RED, "bold": True}},
-                    },
-                    {
-                        "type": "textContains",
-                        "values": [f'"PRESENT"'],
-                        "format": {"textFormat": {"foregroundColor": GREEN, "bold": True}},
-                    },
-                ]
-            },
-        )
+        # Everyone starts ABSENT: paint the Status column (C2:C…) with a solid
+        # red background up-front. mark_student_present flips one cell to green
+        # the instant that student is recorded, so the tab reads red -> green
+        # exactly as required (no fragile conditional-format rules).
+        if roster:
+            requests.append({
+                "repeatCell": {
+                    "range": {"sheetId": sheet.id, "startRowIndex": 1,
+                              "endRowIndex": 1 + len(roster),
+                              "startColumnIndex": 2, "endColumnIndex": 3},
+                    "cell": {"userEnteredFormat": {
+                        "backgroundColor": RED,
+                        "textFormat": {"bold": True, "foregroundColor": WHITE},
+                    }},
+                    "fields": "userEnteredFormat",
+                }
+            })
+        # NOTE: Worksheet.batch_update() is gspread's *value-range* helper and
+        # rewrites `data[i]["range"]`, so passing raw Sheets API request objects
+        # (repeatCell/updateCells) raises KeyError: 'range'. Raw requests must go
+        # through the spreadsheet-level batchUpdate endpoint instead.
+        spreadsheet.batch_update({"requests": requests})
     except (GSpreadException, APIError):
         logger.exception("Could not create the session sheet title=%s", title)
         raise ServiceUnavailableError("Could not create the session Google Sheet.")
     logger.info("Session sheet created title=%s students=%s", title, len(roster))
+    _remember_rows(title, roster)
     return title
 
 
-def mark_student_present(sheet_title: str, enrollment_no: str) -> None:
-    """Flip one student's Status cell to PRESENT in the session worksheet.
-    The enrollment comes from backend-verified data, never from user input."""
+def _remember_rows(title: str, roster: list[tuple[str, str]]) -> None:
+    """Index the seeded rows (row 1 is the header) for later fast updates."""
+    if len(_session_rows) >= _SESSION_ROW_CACHE_MAX:
+        _session_rows.pop(next(iter(_session_rows)), None)  # trim oldest tab
+    _session_rows[title] = {
+        _norm_enrollment(enrollment): index + 2
+        for index, (enrollment, _name) in enumerate(roster)
+    }
+
+
+def _ensure_remarks_column(sheet) -> None:
+    """Backfill the 4th 'Remarks' column on a session tab that predates this
+    feature (3-column layout). Idempotent and best-effort — a failure here
+    must never block a session from starting or joining."""
     try:
-        sheet = _open_spreadsheet().worksheet(sheet_title)
-        # Exact match on the raw enrollment value; "" means not found.
-        found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
-        row = str(found[0][0]).strip() if found and found[0] else ""
-        if not row or not row.replace(".0", "").isdigit():
-            logger.warning("Enrollment not found on session sheet title=%s", sheet_title)
+        if sheet.col_count < 4:
+            sheet.add_cols(4 - sheet.col_count)
+        header = (sheet.get_values("A1:D1") or [[]])[0]
+        current = str(header[3]).strip().lower() if len(header) >= 4 else ""
+        if current == "remarks":
             return
-        sheet.update(f"C{int(float(row))}", [["PRESENT"]],
-                     value_input_option="RAW")
+        sheet.update(range_name="D1", values=[["Remarks"]])
+        try:
+            sheet.format("D1", {"textFormat": {"bold": True}})
+        except (GSpreadException, APIError):
+            pass
+        logger.info("Backfilled Remarks column title=%s", sheet.title)
+    except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
+        logger.warning("Session sheet missing while ensuring Remarks column")
+    except (GSpreadException, APIError):
+        logger.exception("Could not ensure Remarks column title=%s", sheet.title)
+
+
+def _resolve_row(sheet, sheet_title: str, enrollment_no: str,
+                 row: int | None = None) -> int | None:
+    """1-based worksheet row for an enrollment: caller-supplied, else the
+    seeding cache, else a scan of column A. Returns None if not found."""
+    target = row or _session_rows.get(sheet_title, {}).get(
+        _norm_enrollment(enrollment_no)
+    )
+    if target is not None:
+        return int(target)
+    key = _norm_enrollment(enrollment_no)
+    if not key:
+        return None
+    # Cache miss (e.g. after a server restart). gspread's Worksheet has no
+    # formula() method, so a MATCH formula cannot be evaluated client-side —
+    # read column A and locate the enrollment value directly instead.
+    try:
+        column_a = sheet.col_values(1)
+    except (GSpreadException, APIError):
+        logger.exception("Could not read column A title=%s", sheet_title)
+        return None
+    for index, value in enumerate(column_a, start=1):
+        if _norm_enrollment(value) == key:
+            return index
+    return None
+
+
+def mark_student_present(sheet_title: str, enrollment_no: str,
+                         row: int | None = None) -> None:
+    """Flip one student's Status cell to PRESENT in the session worksheet.
+    The enrollment comes from backend-verified data, never from user input.
+
+    `row` is the 1-based worksheet row the caller already knows. When it is not
+    supplied, the row remembered from seeding this tab is used; only when that
+    is unknown too does the service fall back to a column-A value search.
+    """
+    try:
+        spreadsheet = _open_spreadsheet()
+        sheet = spreadsheet.worksheet(sheet_title)
+        target = _resolve_row(sheet, sheet_title, enrollment_no, row)
+        if target is None:
+            logger.warning("Enrollment not found on session sheet title=%s",
+                           sheet_title)
+            return
+        # Flip this student's Status cell to PRESENT AND paint its background
+        # green (from the seeded red) in a single spreadsheet-level batchUpdate.
+        requests = [{
+            "updateCells": {
+                "range": {"sheetId": sheet.id,
+                          "startRowIndex": target - 1, "endRowIndex": target,
+                          "startColumnIndex": 2, "endColumnIndex": 3},
+                "rows": [{"values": [{
+                    "userEnteredValue": {"stringValue": "PRESENT"},
+                    "userEnteredFormat": {
+                        "backgroundColor": GREEN,
+                        "textFormat": {"bold": True, "foregroundColor": WHITE},
+                    },
+                }]}],
+                "fields": "userEnteredValue,userEnteredFormat",
+            }
+        }]
+        spreadsheet.batch_update({"requests": requests})
     except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):
         logger.exception("Could not mark PRESENT on the session sheet title=%s", sheet_title)
+
+
+def flag_proxy_remarks(sheet_title: str, enrollments: list[str]) -> None:
+    """Write REMARK_PROXY into the Remarks column (D) for every enrollment
+    given — all students sharing one device_hash (same browser + same IP).
+
+    Called only when the backend has confirmed two or more distinct students on
+    that device_hash, so a shared Wi-Fi router (same IP, different browsers)
+    never triggers it. Best-effort: failures are logged, never raised upward."""
+    if not enrollments:
+        return
+    try:
+        spreadsheet = _open_spreadsheet()
+        sheet = spreadsheet.worksheet(sheet_title)
+        requests = []
+        seen_rows: set[int] = set()
+        for enrollment in enrollments:
+            target = _resolve_row(sheet, sheet_title, enrollment)
+            if target is None or target in seen_rows:
+                continue
+            seen_rows.add(target)
+            requests.append({
+                "updateCells": {
+                    "range": {"sheetId": sheet.id,
+                              "startRowIndex": target - 1, "endRowIndex": target,
+                              "startColumnIndex": 3, "endColumnIndex": 4},
+                    "rows": [{"values": [{
+                        "userEnteredValue": {"stringValue": REMARK_PROXY},
+                        "userEnteredFormat": {
+                            "backgroundColor": AMBER,
+                            "textFormat": {"bold": True},
+                        },
+                    }]}],
+                    "fields": "userEnteredValue,userEnteredFormat",
+                }
+            })
+        if requests:
+            spreadsheet.batch_update({"requests": requests})
+            logger.info("Proxy remarks written title=%s rows=%s",
+                        sheet_title, len(requests))
+    except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
+        logger.warning("Session sheet is missing title=%s", sheet_title)
+    except (GSpreadException, APIError):
+        logger.exception("Could not write proxy remarks on the session sheet title=%s",
+                         sheet_title)
