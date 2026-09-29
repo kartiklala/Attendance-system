@@ -35,6 +35,10 @@ class Settings:
     ATTENDANCE_RADIUS_METERS: float = _float("ATTENDANCE_RADIUS_METERS", 30)
     STUDENT_SESSION_MINUTES: int = _int("STUDENT_SESSION_MINUTES", 1)
     QR_TOKEN_LIFETIME_SECONDS: int = _int("QR_TOKEN_LIFETIME_SECONDS", 10)
+    # Sentinel lifetime meaning "never auto-expire": the QR stays valid until
+    # the CR manually refreshes it (POST /qr/rotate). 0 is falsy, so every
+    # read of this field must be None-safe (never `value or default`).
+    QR_PERMANENT_LIFETIME_SECONDS: int = 0
     # CR-adjustable QR lifetimes (seconds). Backend validates every request
     # against this list — the frontend can never pick an unsafe value.
     QR_ALLOWED_LIFETIME_SECONDS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)

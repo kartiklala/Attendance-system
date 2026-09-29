@@ -6,10 +6,11 @@
 // The QR only carries a random short-lived token URL — never JWTs,
 // ID tokens or personal data. All validity decisions are made by FastAPI.
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox, ProgressBar } from "../components/ui";
+import { ErrorBox, ProgressBar, BrandMark } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 const REFRESH_SECONDS_FALLBACK = 10;
@@ -18,6 +19,11 @@ const POPUP_LIFETIME_MS = 4200;
 // Mirrors the backend allow-list (settings.QR_ALLOWED_LIFETIME_SECONDS) —
 // the server validates every value again, this only shapes the dropdown.
 const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
+// Sentinel lifetime for a QR that never auto-expires (mirrors the backend
+// settings.QR_PERMANENT_LIFETIME_SECONDS). Selected from the dropdown as
+// "Permanent"; only the manual Refresh control replaces it.
+const QR_LIFETIME_PERMANENT = 0;
+const isPermanentQr = (qr) => !!qr && (qr.is_permanent === true || qr.expires_in_seconds === 0);
 
 // Absentee CSV (backend-verified data). Quoted fields + BOM so enrollment
 // numbers with leading zeros open correctly in Excel.
@@ -39,7 +45,8 @@ function downloadAbsenteeCSV(summary) {
 }
 
 export default function CRDashboard() {
-  const { profile, logout } = useAuth();
+  const { profile, role, logout } = useAuth();
+  const navigate = useNavigate();
   // loading -> idle -> starting -> active -> ending -> ended
   const [stage, setStage] = useState("loading");
   const [session, setSession] = useState(null); // { session_id, qr: {...} }
@@ -54,6 +61,7 @@ export default function CRDashboard() {
   const [qrLifetime, setQrLifetime] = useState(REFRESH_SECONDS_FALLBACK);
   const [lifetimeSaving, setLifetimeSaving] = useState(false);
   const [lifetimeNotice, setLifetimeNotice] = useState(null);
+  const [qrRefreshing, setQrRefreshing] = useState(false); // manual Refresh QR
   const [copied, setCopied] = useState(false); // "Copied!" on the absentee list
   const timerRef = useRef(null);
   const tickRef = useRef(0);
@@ -69,6 +77,14 @@ export default function CRDashboard() {
     if (statsRef.current) {
       clearInterval(statsRef.current);
       statsRef.current = null;
+    }
+  }, []);
+
+  // Stop only the QR rotation countdown (keeps the live-stats poll running).
+  const stopQrClock = useCallback(() => {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
     }
   }, []);
 
@@ -171,6 +187,23 @@ export default function CRDashboard() {
     [showFinalSummary]
   );
 
+  // Drive the countdown only for timed QRs. A Permanent QR must never
+  // auto-rotate, so we stop its clock and surface the manual Refresh instead.
+  const applyQrClock = useCallback(
+    (sessionId, qr) => {
+      if (isPermanentQr(qr)) {
+        stopQrClock();
+        setCountdown(0);
+        return;
+      }
+      startClock(
+        sessionId,
+        qr.countdown_seconds || qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
+      );
+    },
+    [startClock, stopQrClock]
+  );
+
   // On mount (and after re-authorization): rejoin the shared active session
   // if the backend says one exists — the backend is the source of truth.
   useEffect(() => {
@@ -185,13 +218,11 @@ export default function CRDashboard() {
             session_name: data.session.session_name || "",
             qr: data.qr,
           });
-          setQrLifetime(data.session.qr_lifetime_seconds || REFRESH_SECONDS_FALLBACK);
+          const rawLifetime = data.session.qr_lifetime_seconds;
+          setQrLifetime(rawLifetime == null ? REFRESH_SECONDS_FALLBACK : rawLifetime);
           if (data.stats) setStats(data.stats);
           setStage("active");
-          startClock(
-            data.session.session_id,
-            data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
-          );
+          applyQrClock(data.session.session_id, data.qr);
           startStatsPolling(data.session.session_id);
         } else if (!cancelled) {
           setStage("idle");
@@ -208,7 +239,7 @@ export default function CRDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [startClock, startStatsPolling]);
+  }, [applyQrClock, startStatsPolling]);
 
   const handleStart = async () => {
     if (busyRef.current) return; // first click wins — no duplicate requests
@@ -233,14 +264,15 @@ export default function CRDashboard() {
       const data = await api.startAttendance(location.latitude, location.longitude, name);
       seenRef.current = new Set();
       setSession(data);
-      setQrLifetime(data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK);
+      setQrLifetime(
+        isPermanentQr(data.qr)
+          ? QR_LIFETIME_PERMANENT
+          : data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK
+      );
       setSessionName("");
       setSummary(null);
       setStage("active");
-      startClock(
-        data.session_id,
-        data.qr.countdown_seconds || data.qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
-      );
+      applyQrClock(data.session_id, data.qr);
       startStatsPolling(data.session_id);
     } catch (err) {
       setError(err.message);
@@ -263,15 +295,44 @@ export default function CRDashboard() {
     setQrLifetime(seconds);
     try {
       const data = await api.setQRLifetime(session.session_id, seconds);
-      setQrLifetime(data.qr_lifetime_seconds);
+      const lifetime = data.qr_lifetime_seconds;
+      setQrLifetime(lifetime);
+      // Mint a fresh QR right away so the new lifetime — especially the switch
+      // to/from Permanent — takes effect immediately, then resync the clock.
+      const qrData = await api.rotateQR(session.session_id);
+      setSession((current) =>
+        current ? { ...current, qr: qrData.qr } : current
+      );
+      applyQrClock(session.session_id, qrData.qr);
       setLifetimeNotice(
-        `QR now valid for ${data.qr_lifetime_seconds}s — from the next refresh.`
+        lifetime === QR_LIFETIME_PERMANENT
+          ? "QR is now Permanent — it stays valid until you tap Refresh QR."
+          : `QR now valid for ${lifetime}s.`
       );
     } catch (err) {
       setQrLifetime(previous);
       setError(err.message);
     } finally {
       setLifetimeSaving(false);
+    }
+  };
+
+  // Manual refresh: invalidate the current QR and show a brand-new one.
+  // Primary control in Permanent mode; also handy for timed QRs.
+  const handleManualRefresh = async () => {
+    if (!session?.session_id || qrRefreshing) return;
+    setQrRefreshing(true);
+    setError(null);
+    try {
+      const data = await api.rotateQR(session.session_id);
+      setSession((current) =>
+        current ? { ...current, qr: data.qr } : current
+      );
+      applyQrClock(session.session_id, data.qr);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setQrRefreshing(false);
     }
   };
 
@@ -479,15 +540,28 @@ export default function CRDashboard() {
       <div className="page-center">
         <div className="card cr-card">
           <header className="cr-header">
-            <div>
-              <h1 className="app-title">Student Attendance System</h1>
-              <p className="app-subtitle">
-                Welcome, {profile?.name || profile?.email || "CR"}
-              </p>
+            <div className="brand-lockup brand-lockup-row">
+              <BrandMark size={44} />
+              <div className="brand-text">
+                <h1 className="app-title brand-name">Attendify</h1>
+                <p className="app-subtitle">
+                  Welcome, {profile?.name || profile?.email || "CR"}
+                </p>
+              </div>
             </div>
-            <button className="btn btn-ghost" onClick={logout}>
-              Sign out
-            </button>
+            <div className="header-actions">
+              {role === "admin" && (
+                <button
+                  className="btn btn-ghost btn-small"
+                  onClick={() => navigate("/admin")}
+                >
+                  Admin Dashboard
+                </button>
+              )}
+              <button className="btn btn-ghost btn-small" onClick={logout}>
+                Sign out
+              </button>
+            </div>
           </header>
 
           {stage === "loading" && <ProgressBar percent={40} />}
@@ -524,6 +598,7 @@ export default function CRDashboard() {
                   onChange={(e) => handleLifetimeChange(Number(e.target.value))}
                   disabled={lifetimeSaving}
                 >
+                  <option value={QR_LIFETIME_PERMANENT}>Permanent</option>
                   {QR_LIFETIME_OPTIONS.map((seconds) => (
                     <option key={seconds} value={seconds}>
                       {seconds} seconds
@@ -532,7 +607,30 @@ export default function CRDashboard() {
                 </select>
               </div>
               {lifetimeNotice && <p className="qr-lifetime-notice">{lifetimeNotice}</p>}
-              <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
+              {isPermanentQr(session.qr) ? (
+                <div className="qr-permanent-row">
+                  <span className="qr-countdown-permanent">
+                    Permanent QR — stays valid until you refresh it
+                  </span>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-small qr-refresh-btn"
+                    onClick={handleManualRefresh}
+                    disabled={qrRefreshing}
+                    aria-label="Refresh QR code"
+                  >
+                    <span
+                      className={`qr-refresh-icon${qrRefreshing ? " spinning" : ""}`}
+                      aria-hidden="true"
+                    >
+                      ↻
+                    </span>
+                    {qrRefreshing ? "Refreshing…" : "Refresh QR"}
+                  </button>
+                </div>
+              ) : (
+                <p className="qr-countdown">QR refreshes in: {countdown} seconds</p>
+              )}
               <p className="session-id muted">Session ID: {session.session_id}</p>
               <button
                 className="btn btn-danger btn-large"

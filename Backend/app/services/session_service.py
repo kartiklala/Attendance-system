@@ -125,11 +125,18 @@ def create_or_get_session(
 def set_qr_lifetime(session_id: str, lifetime_seconds: int) -> int:
     """CR-adjustable QR lifetime. Applied to FUTURE token rotations; the
     current token keeps its own expiry until the next rotation. The backend
-    validates against the allowed values — the frontend decides nothing."""
-    if lifetime_seconds not in settings.QR_ALLOWED_LIFETIME_SECONDS:
+    validates against the allowed values — the frontend decides nothing.
+    A lifetime of settings.QR_PERMANENT_LIFETIME_SECONDS (0) selects
+    "Permanent": the QR never auto-expires and only changes on a manual
+    refresh (POST /qr/rotate)."""
+    allowed = (settings.QR_PERMANENT_LIFETIME_SECONDS, *settings.QR_ALLOWED_LIFETIME_SECONDS)
+    if lifetime_seconds not in allowed:
+        readable = [
+            "Permanent" if s == settings.QR_PERMANENT_LIFETIME_SECONDS else f"{s}s"
+            for s in allowed
+        ]
         raise BadRequestError(
-            "Invalid QR lifetime. Allowed values: "
-            + ", ".join(f"{s}s" for s in settings.QR_ALLOWED_LIFETIME_SECONDS) + ".",
+            "Invalid QR lifetime. Allowed values: " + ", ".join(readable) + ".",
             code="INVALID_QR_LIFETIME",
         )
     session = get_session(session_id)

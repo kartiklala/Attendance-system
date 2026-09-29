@@ -12,7 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox } from "../components/ui";
+import { ErrorBox, BrandMark } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 const formatMMSS = (seconds) =>
@@ -96,6 +96,9 @@ export default function StudentAttendance() {
       // Ensure the backend cookie exists BEFORE the protected call. The
       // redirect flow authorizes asynchronously at boot, so we no longer
       // assume it has already run (that race caused verify-token 401s).
+      // Wake a possibly-spun-down Render instance first, so the real
+      // verify-token below runs once instead of retrying against a cold 404.
+      await api.warmUp();
       const authed = await ensureSession();
       if (!authed) {
         setSubmitError("Could not verify your sign-in. Please try again.");
@@ -452,6 +455,7 @@ function StudentCard({ title, body, hint, children }) {
       <div className="student-shell">
         <SignOutChip />
         <div className="card student-card">
+          <BrandMark size={54} className="brand-student" />
           {title && <h1 className="app-title">{title}</h1>}
           {body && <p>{body}</p>}
           {hint && <p className="muted hint">{hint}</p>}

@@ -43,6 +43,10 @@ router = APIRouter(tags=["attendance"])
 
 
 def _session_info(session: dict) -> SessionInfo:
+    raw_lifetime = session.get("qr_lifetime_seconds")
+    # None-safe: 0 is a valid "Permanent" lifetime, never coerce it away.
+    lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS if raw_lifetime is None
+                else int(raw_lifetime))
     return SessionInfo(
         session_id=session["session_id"],
         session_name=session.get("session_name", ""),
@@ -51,8 +55,7 @@ def _session_info(session: dict) -> SessionInfo:
         longitude=float(session.get("longitude", 0)),
         radius_meters=float(session.get("radius_meters", settings.ATTENDANCE_RADIUS_METERS)),
         status=session.get("status", "active"),
-        qr_lifetime_seconds=int(session.get("qr_lifetime_seconds")
-                                or settings.QR_TOKEN_LIFETIME_SECONDS),
+        qr_lifetime_seconds=lifetime,
         started_at=str(session.get("started_at", "")),
         ended_at=session.get("ended_at"),
     )
@@ -123,6 +126,18 @@ def refresh_qr(
     return QRRefreshResponse(success=True, qr=qr)
 
 
+@router.post("/qr/rotate", response_model=QRRefreshResponse)
+def rotate_qr(
+    payload: QRRefreshRequest,
+    cr: CurrentUser = Depends(require_cr),
+) -> QRRefreshResponse:
+    """CR-only: force a brand-new QR right now and invalidate the previous
+    token. Powers the manual "Refresh QR" control (notably in Permanent mode,
+    where the QR would otherwise never change on its own)."""
+    qr = qr_service.rotate_qr_now(payload.session_id)
+    return QRRefreshResponse(success=True, qr=qr)
+
+
 @router.post("/qr/lifetime", response_model=QRLifetimeResponse)
 def set_qr_lifetime(
     payload: QRLifetimeRequest,
@@ -173,7 +188,7 @@ def get_session(
 ) -> SessionResponse:
     """Authenticated: view session details (location redacted for students)."""
     session = session_service.get_session(session_id)
-    if user.role != "cr":
+    if user.role not in ("cr", "admin"):
         session = {**session, "cr_uid": "", "latitude": 0.0, "longitude": 0.0}
     return SessionResponse(success=True, session=_session_info(session))
 

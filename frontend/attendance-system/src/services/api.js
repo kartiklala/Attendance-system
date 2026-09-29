@@ -23,12 +23,35 @@ export function setAuthRecovery(fn, permanentFn) {
   onAuthPermanent = permanentFn;
 }
 
-async function request(path, { method = "GET", body, firebaseIdToken } = {}, isRetry = false) {
+// Render spins the free backend instance down when it has been idle. The first
+// business request then hits a cold / gateway 404, and the retry chain in
+// `request` turned that single logical call into a burst of duplicate POSTs
+// (this is exactly why /attendance/verify-token was firing three times). Waking
+// the instance up front with a cheap, idempotent GET /health means the real
+// request runs once against an already-warm backend. Best-effort only: it never
+// throws and gives up after a few seconds so a slow boot can't hang the UI.
+export async function warmUp() {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      const res = await fetch(`${API_BASE}/health`, { method: "GET", credentials: "include" });
+      if (res.ok) return true;
+    } catch {
+      /* still booting / connection refused — keep polling */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+  }
+  return false;
+}
+
+async function request(path, { method = "GET", body, firebaseIdToken } = {}, meta = {}) {
+  const { coldRetried = false, authRetried = false } = meta;
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (firebaseIdToken) headers.Authorization = `Bearer ${firebaseIdToken}`;
   else if (applicationJwt && path !== "/authorize-user")
     headers.Authorization = `Bearer ${applicationJwt}`;
+
+  const retryOpts = { method, body, firebaseIdToken };
 
   let response;
   try {
@@ -39,6 +62,12 @@ async function request(path, { method = "GET", body, firebaseIdToken } = {}, isR
       credentials: "include",
     });
   } catch {
+    // Connection blip / backend cold start (Render spins the free instance
+    // down when idle): retry ONCE after a short wait before surfacing.
+    if (!coldRetried && path !== "/authorize-user") {
+      await new Promise((r) => setTimeout(r, 1600));
+      return request(path, retryOpts, { ...meta, coldRetried: true });
+    }
     const err = new Error("Cannot reach the server. Please try again.");
     err.code = "NETWORK_ERROR";
     throw err;
@@ -51,12 +80,29 @@ async function request(path, { method = "GET", body, firebaseIdToken } = {}, isR
     /* empty/non-JSON body */
   }
 
+  // Cold-start / gateway transient (404/408/425/429/5xx). Render's edge can
+  // answer the very first request with a bare 404/502 while the app boots.
+  // We retry ONLY when the body is NOT a structured FastAPI error (our real
+  // errors always carry `error.code`), so genuine 404s (e.g. an unknown
+  // session) are surfaced immediately instead of being retried.
+  const transient = [404, 408, 425, 429, 502, 503, 504].includes(response.status);
+  if (
+    !response.ok &&
+    transient &&
+    !coldRetried &&
+    !(data && data.error) &&
+    path !== "/authorize-user"
+  ) {
+    await new Promise((r) => setTimeout(r, 1600));
+    return request(path, retryOpts, { ...meta, coldRetried: true });
+  }
+
   // Application JWT expired -> silently re-authorize once, then retry.
   // If recovery is impossible or fails, treat the user as unauthenticated
   // so stale screens (Continue buttons etc.) can never keep working.
-  if (response.status === 401 && !isRetry && path !== "/authorize-user") {
+  if (response.status === 401 && !authRetried && path !== "/authorize-user") {
     const recovered = recoverAuth ? await recoverAuth() : false;
-    if (recovered) return request(path, { method, body, firebaseIdToken }, true);
+    if (recovered) return request(path, retryOpts, { ...meta, authRetried: true });
     if (onAuthPermanent) onAuthPermanent();
   }
 
@@ -100,6 +146,11 @@ export const startAttendance = (latitude, longitude, sessionName) =>
 
 export const refreshQR = (sessionId) =>
   request("/qr/refresh", { method: "POST", body: { session_id: sessionId } });
+
+// Force a NEW QR token immediately (invalidates the previous one). Used by
+// the CR's manual "Refresh QR" control and to apply a lifetime change at once.
+export const rotateQR = (sessionId) =>
+  request("/qr/rotate", { method: "POST", body: { session_id: sessionId } });
 
 // CR requests a NEW lifetime for future QR rotations; the backend validates
 // it against an allow-list (the frontend never decides QR validity).

@@ -4,12 +4,14 @@
 // admin role from the signed JWT on every call (a manually crafted request
 // from a student/CR is rejected with 403 regardless of this UI).
 import { useCallback, useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox } from "../components/ui";
+import { ErrorBox, BrandMark } from "../components/ui";
 
 export default function AdminDashboard() {
   const { profile, logout } = useAuth();
+  const navigate = useNavigate();
   const [emails, setEmails] = useState([]);
   const [listError, setListError] = useState(null);
   const [email, setEmail] = useState("");
@@ -74,15 +76,23 @@ export default function AdminDashboard() {
     <div className="page-center">
       <div className="card">
         <div className="cr-header">
-          <div>
-            <h1 className="app-title">Admin Dashboard</h1>
-            <p className="app-subtitle">
-              {profile?.email ? `Signed in as ${profile.email}` : "Manage Class Representative access"}
-            </p>
+          <div className="brand-lockup brand-lockup-row">
+            <BrandMark size={44} />
+            <div className="brand-text">
+              <h1 className="app-title brand-name">Attendify</h1>
+              <p className="app-subtitle">
+                {profile?.email ? `Admin Console · ${profile.email}` : "Manage Class Representative access"}
+              </p>
+            </div>
           </div>
-          <button className="btn btn-ghost" onClick={() => logout().catch(() => {})}>
-            Sign out
-          </button>
+          <div className="header-actions">
+            <button className="btn btn-ghost btn-small" onClick={() => navigate("/cr")}>
+              Open CR Dashboard
+            </button>
+            <button className="btn btn-ghost btn-small" onClick={() => logout().catch(() => {})}>
+              Sign out
+            </button>
+          </div>
         </div>
 
         <section className="admin-section">

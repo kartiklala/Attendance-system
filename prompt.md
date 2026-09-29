@@ -1,722 +1,584 @@
-You are working on my existing Attendance System project.
+I want you to significantly improve the overall UI/UX of my existing attendance web application, **Attendiffy**.
 
-PROJECT STRUCTURE:
+The application is already functional. This task is primarily a **UI/UX and visual redesign**.
 
-attendance-system/
-├── frontend/        # React.js + Vite
-└── Backend/         # Python + FastAPI
+The application is a QR-based student attendance system with 4 main interfaces:
 
-CURRENT ARCHITECTURE:
-
-React Frontend
-│ HTTPS REST APIs
-▼
-Python FastAPI Backend
-│
-├── Firebase Admin SDK → Firestore
-└── Google Sheets API → Google Sheets
-
-IMPORTANT:
-
-* React must NOT directly access Firestore or Google Sheets.
-* All authentication, authorization, attendance validation, session logic, roster lookup, duplicate prevention, and attendance status decisions must remain backend-controlled.
-* Do NOT rewrite unrelated existing functionality.
-* First inspect the current codebase and understand the existing implementation before making changes.
-* Preserve the existing Firebase Authentication + application JWT architecture.
-* Preserve the existing session ID, QR token, location validation, duplicate attendance prevention, and Google Sheet roster mechanisms unless a change below explicitly modifies their behavior.
-* Make changes incrementally and keep the existing functionality working.
-
-==================================================
-REQUIRED CHANGES
-================
-
-1. RECORD DEVICE IP AND BROWSER INFORMATION
+1. Admin Dashboard
+2. CR (Class Representative) Screen
+3. Student Landing Screen — where students arrive after scanning the QR
+4. Student Details / Attendance Screen — where students enter their details and complete attendance
 
 ---
 
-Add attendance audit information so that the system can identify potentially suspicious proxy attendance from the same device during the same session.
+# VERY IMPORTANT — DO NOT BREAK EXISTING FUNCTIONALITY
 
-For every successfully recorded attendance, the backend should record:
+Before making any changes, inspect and understand the existing codebase.
 
-* Firebase UID
-* Enrollment number
-* Student name
-* Session ID
-* Session name
-* Timestamp
-* Student latitude/longitude if already being stored
-* Distance from CR if already being calculated
-* Client IP address
-* Browser/user-agent information
-* A privacy-conscious server/browser-generated device identifier if practical and reliable
+Do NOT rebuild the application from scratch.
 
-IMPORTANT:
+Do NOT unnecessarily modify:
 
-* Obtain IP information on the BACKEND, not from a frontend field.
-* Obtain browser/user-agent information from the HTTP request headers on the backend.
-* Do NOT attempt to collect IMEI, MAC address, phone serial number, SIM number, or other hardware identifiers.
-* Do NOT rely on IP/device information as the primary attendance authentication mechanism.
-* Existing Google authentication, verified student identity, QR/session validation, and location validation remain the primary mechanisms.
+* Authentication
+* Google Sign-In
+* QR generation/scanning
+* Attendance logic
+* Database operations
+* API calls
+* Routing
+* Session management
+* Student verification
+* Admin permissions
+* CR permissions
+* Existing business logic
 
-Add backend logic to detect/flag suspicious cases such as:
+The goal is:
 
-* Multiple different students marking attendance from the same device identifier during the same session.
-* Multiple different students using the same IP during the same session.
+**Existing functionality + significantly better UI/UX**
 
-Do NOT automatically reject attendance merely because students share an IP/device. Instead, make this an audit/flagging mechanism unless the existing architecture already has a clearly defined rejection rule.
+Do not change application behavior just to achieve a visual redesign.
 
-The CR UI should be able to see a simple warning such as:
+---
 
-"⚠ Multiple students marked from the same device"
+# STEP 1 — ANALYZE THE EXISTING APPLICATION
 
-or
+First inspect the entire frontend codebase.
 
-"⚠ Multiple students detected from the same IP"
+Identify:
 
-Do NOT expose raw IP addresses to students.
+* Framework
+* Styling system
+* Component structure
+* Routing
+* Authentication-related UI
+* Admin pages
+* CR pages
+* Student pages
+* QR attendance flow
+* Existing reusable components
+* Existing logo/branding
+* Existing responsive behavior
 
-Preferably keep detailed technical audit information backend-side and only expose the minimum information required to the CR/Admin.
+Understand how the current UI works before modifying it.
 
-==================================================
-2. CREATE A NEW GOOGLE SHEET FOR EVERY ATTENDANCE SESSION
----------------------------------------------------------
+Before implementation, briefly summarize:
 
-Whenever a NEW attendance session is successfully created, automatically create a new Google Sheets worksheet/tab for that session.
+1. Current UI architecture
+2. Main screens/components discovered
+3. Current styling approach
+4. Major visual/UX issues
+5. Proposed redesign direction
 
-IMPORTANT:
+Then implement the redesign.
 
-* Do NOT create a new spreadsheet file unless the current Google Sheets architecture requires that.
-* Prefer creating a new worksheet/tab inside the existing attendance spreadsheet.
-* Each session must have its own attendance sheet/tab.
-* Existing Sheet1 remains the authoritative master student roster.
-* Existing Sheet2/current attendance mechanism must not be unnecessarily broken.
+---
 
-When a new session starts:
+# STEP 2 — NEW BRANDING / LOGO
 
-1. Read the complete student roster from Sheet1.
-2. Create a new worksheet/tab for the newly created session.
-3. Copy the following information from Sheet1:
+I have provided the application's logo here:
 
-   * Enrollment ID
-   * Student Name
-4. Add a Status column.
+`C:\Users\This Pc\Desktop\attendance_roaster\frontend\attendance-system\src\assets\attendiffy.jpg`
 
-Example:
+This is the **Attendiffy logo**.
 
-## Enrollment ID | Student Name | Status
+Use this existing asset as the application's primary branding wherever appropriate.
 
-2026001       | Student A   | ABSENT
-2026002       | Student B   | ABSENT
-2026003       | Student C   | ABSENT
+Do not create a completely different logo.
 
-Initially every student must be ABSENT.
+Use the logo consistently in places such as:
 
-When a student successfully marks attendance:
+* Login/authentication screens
+* Header
+* Sidebar/navigation
+* Student pages where appropriate
+* Admin pages where appropriate
+* CR pages where appropriate
 
-* Update that student's Status to PRESENT in the session-specific worksheet.
-* Do not trust the frontend to decide the status.
-* The backend must determine that attendance is valid and then update the sheet.
+However, do not overuse the logo.
 
-Formatting:
+Maintain good visual hierarchy and spacing around it.
 
-* PRESENT should be displayed in GREEN.
-* ABSENT should be displayed in RED.
-* Use readable formatting and preserve the enrollment number/name.
-* Avoid creating duplicate session sheets if the same request is accidentally submitted twice.
-* The worksheet must be associated with the backend session ID so the correct sheet is always updated.
+---
 
-IMPORTANT:
+# STEP 3 — BROWSER TAB ICON / FAVICON
 
-The existing Sheet1 must remain the master roster.
+The browser currently displays the default **Vite icon** in the browser tab.
 
-Do not allow students or the frontend to modify the roster directly.
+Remove the Vite favicon completely.
 
-Use the existing backend Google Sheets service and extend it rather than creating an unrelated second implementation.
+Use the provided Attendiffy logo:
 
-If the Google Sheets API requires additional permissions or configuration, keep the implementation compatible with the existing service account setup.
+`C:\Users\This Pc\Desktop\attendance_roaster\frontend\attendance-system\src\assets\attendiffy.jpg`
 
-==================================================
-3. SESSION NAME ENTERED BY CR
------------------------------
+as the application's favicon.
 
-When the CR clicks "Start Session", show a small UI asking for a Session Name.
+Because this is a Vite application:
 
-Example:
+1. Determine the correct way to make the logo available as a favicon.
+2. If necessary, copy an appropriate version of the asset into the `public` directory.
+3. Update `index.html`.
+4. Remove references to `/vite.svg`.
+5. Make sure the favicon works in both development and production.
+6. Check for any other default Vite branding in the frontend and remove it where appropriate.
 
-Session Name:
-[ MCA Gen-AI - Morning Attendance ]
+Do NOT leave the Vite icon anywhere in the application.
 
-[Start Session]
+If the JPG is not ideal for a favicon, create/use an appropriate favicon version derived from the same Attendiffy logo while keeping the original logo unchanged.
 
-The entered session name should be stored with the attendance session.
+---
 
-IMPORTANT:
+# STEP 4 — AMITY-INSPIRED VISUAL THEME
 
-This must NOT replace or modify the existing Session ID mechanism.
+I want the visual design to have an **Amity University-inspired academic/educational aesthetic**.
 
-The system must continue generating and using its existing unique Session ID internally.
+Important:
 
-The session should contain both:
+Do NOT make the website falsely appear to be an official Amity University website.
 
-session_id = existing unique backend-generated ID
+Do not copy Amity's website directly.
 
-session_name = name entered by CR
+Instead, take inspiration from the kind of visual language associated with a premium university environment:
 
-Example:
+* Academic
+* Professional
+* Institutional
+* Clean
+* Modern
+* Premium
+* Trustworthy
 
-{
-"session_id": "existing-generated-id",
-"session_name": "MCA Gen-AI - Morning Attendance",
-...
-}
+The website should feel appropriate for use by university students, CRs, faculty/admin, and academic staff.
 
-The session name is for human readability/UI/Google Sheet identification only.
+---
 
-Session ID remains the authoritative technical identifier.
+# COLOR DIRECTION
 
-Validate the session name:
+Use a refined university-style color palette.
 
-* Trim whitespace.
-* Do not allow an empty session name.
-* Keep a reasonable maximum length.
-* Do not allow the session name to be used as an identifier/security token.
+Prefer a combination built around:
 
-Show the session name on the CR attendance screen and in the session-specific Google Sheet/tab name where practical.
+* Deep navy / dark blue
+* Rich blue
+* White
+* Very light cool/neutral backgrounds
+* Subtle gold/yellow accents where appropriate
 
-==================================================
-4. ABSENTEE LIST SORTING + CSV/COPY
------------------------------------
+The colors should feel premium and academic.
 
-After the CR ends an attendance session, show the absentee list.
+Do not turn the entire application into a blue/gold gradient.
 
-Currently absentees may be displayed alphabetically by name.
+Use colors with purpose:
 
-CHANGE THIS:
+### Primary
 
-Sort absentees in ASCENDING ORDER by Enrollment Number.
+For important actions and navigation.
 
-Example:
+### Secondary
 
-## Enrollment No | Name
+For supporting UI elements.
 
-2026001       | Rahul
-2026004       | Amit
-2026010       | Priya
+### Accent
 
-Do NOT sort by student name.
+For highlights and important academic/status information.
 
-Use the authoritative enrollment number from the backend roster.
+### Success
 
-Handle enrollment numbers correctly as strings where necessary so that leading zeros are not accidentally lost.
+For attendance successfully marked.
 
-Add two buttons:
+### Warning
 
-[Download CSV]
+For session warnings or actions requiring attention.
 
-[Copy Names]
+### Error
 
-DOWNLOAD CSV:
+For invalid forms/errors.
 
-* Generate/download a CSV containing at minimum:
-  Enrollment Number
-  Student Name
+Maintain good contrast and accessibility.
 
-Example:
+---
 
-Enrollment Number,Student Name
-2026001,Rahul
-2026004,Amit
-2026010,Priya
+# TYPOGRAPHY
 
-The CSV should be generated from backend-verified absentee data.
+Use a modern, professional typeface.
 
-COPY BUTTON:
+The typography should feel appropriate for an academic SaaS application.
 
-Copy the absentee names to the clipboard in a clean format.
+Create a clear hierarchy between:
 
-Example:
+* Page titles
+* Section headings
+* Card titles
+* Body text
+* Labels
+* Helper text
+* Buttons
+* Status text
 
-Rahul
-Amit
-Priya
+Avoid excessive font weights and huge headings.
 
-Preferably provide a small confirmation such as:
+---
 
-"Copied!"
+# OVERALL DESIGN STYLE
 
-Do not require the CR to manually select text.
+The finished application should feel like:
 
-==================================================
-5. CR UI TO INCREASE/DECREASE QR TOKEN LIFE
--------------------------------------------
+**A modern university attendance platform**
 
-Add a UI control on the CR attendance screen that allows the CR to increase or decrease how long the currently displayed QR token remains valid.
+rather than:
 
-Example UI:
+**A generic Vite/React student project.**
 
-QR Valid For: 10 seconds
+Use:
 
-[-]    10 sec    [+]
+* Clean cards
+* Subtle borders
+* Controlled shadows
+* Professional spacing
+* Clear hierarchy
+* Consistent radius
+* Modern buttons
+* Professional tables
+* Status badges
+* Good empty states
+* Proper loading states
 
-or a dropdown:
+Avoid:
 
-QR Lifetime:
-[ 10 seconds ▼ ]
+* Excessive gradients
+* Excessive glassmorphism
+* Excessive rounded elements
+* Huge shadows
+* Too many colors
+* Unnecessary animations
+* Decorative elements that distract from attendance
+* Generic template-looking dashboards
 
-Allow reasonable predefined values, for example:
+---
 
-5 seconds
-10 seconds
-15 seconds
-20 seconds
-30 seconds
-60 seconds
+# ADMIN DASHBOARD
 
-The exact allowed values can be chosen based on the current implementation.
+Redesign the Admin Dashboard to look like a professional university administration system.
 
-IMPORTANT SECURITY REQUIREMENTS:
+Improve:
 
-* The frontend must NOT decide whether a QR token is valid.
-* The backend must create the QR token and determine its expiration.
-* The frontend only requests/changes the desired QR lifetime through a protected backend API.
-* Never put Firebase tokens, application JWTs, student information, or sensitive information inside the QR code.
-* QR tokens must remain random, short-lived, and server validated.
+* Navigation
+* Header
+* Dashboard cards
+* Attendance statistics
+* Student information
+* Session information
+* Tables
+* Filters
+* Search
+* Actions
+* Status indicators
 
-When the CR changes the QR lifetime:
+Existing information should be presented with strong hierarchy.
 
-* Apply it to newly generated/refreshed QR tokens.
-* Do not invalidate the existing attendance session.
-* Do not change the Session ID.
-* Do not change the existing CR session architecture.
-* Continue QR rotation according to the existing mechanism.
+For example, if the current application has:
 
-Do not allow unreasonable values that could weaken security.
+* Total students
+* Present students
+* Absent students
+* Attendance percentage
+* Active sessions
+* Recent sessions
 
-The backend must validate the requested lifetime against an allowed minimum and maximum.
+make those visually easy to scan.
 
-==================================================
-6. ADD A NEW ADMIN ROLE
------------------------
+Do not invent backend functionality.
 
-Add a new role:
+Use only information that already exists.
 
-"admin"
+### Tables
 
-The existing roles are currently:
+Make tables professional and readable.
 
-* cr
-* student
+Use:
 
-New roles:
+* Proper spacing
+* Clear headers
+* Status badges
+* Row hover states
+* Good alignment
+* Responsive handling
 
-* admin
-* cr
-* student
+---
 
-Admin should have a dedicated UI.
+# CR SCREEN
 
-ADMIN FUNCTION:
+The CR screen should be extremely clear because it is used during live attendance.
 
-Allow an Admin to add a new CR email address.
+The CR should immediately understand:
 
-Example:
+* Current class/session
+* Attendance status
+* Whether the QR is active
+* Number of students present
+* Session state
+* Available actions
 
-Admin Dashboard
+The primary action should be visually dominant.
 
-## Add New CR
+If the current system has actions such as:
 
-CR Email:
-[ [example@gmail.com](mailto:example@gmail.com) ]
+* Start attendance
+* Stop attendance
+* Generate/display QR
+* Refresh QR
+* View attendance
+* Monitor attendance
 
-[Add CR]
+organize them clearly without changing their functionality.
 
-The backend must:
+The CR should understand the current attendance state within a few seconds.
 
-1. Verify that the currently authenticated user is an Admin.
-2. Validate and normalize the email.
-3. Add/update the email in the authoritative Firebase/Firestore admin list currently used by the application.
-4. Ensure duplicate emails are handled safely.
-5. Return a success/error response.
+---
 
-IMPORTANT:
+# STUDENT LANDING SCREEN
 
-Do NOT let the frontend directly write to Firestore.
+This is the screen students reach after scanning the attendance QR.
 
-The React frontend must call a protected FastAPI endpoint.
+Keep this interface extremely clean.
 
-Example conceptual endpoint:
+The student should immediately understand:
 
-POST /admin/cr
+1. An attendance session has been detected.
+2. Which class/session it belongs to.
+3. What they need to do next.
 
-The backend should use the existing admin_list collection/mechanism rather than creating a duplicate authorization system.
+Make the primary action very obvious.
 
-AUTHORIZATION:
+Avoid unnecessary navigation and information.
 
-The existing CR authorization mechanism checks the admin_list collection to determine whether an email is a CR.
+The page should feel:
 
-Do NOT accidentally make every admin automatically become a CR unless explicitly intended.
+* Secure
+* Trustworthy
+* Simple
+* Fast
+* Professional
 
-Keep the role hierarchy clear:
+This screen will likely be used primarily on mobile phones, so prioritize mobile UX.
 
-ADMIN:
+---
 
-* Can access Admin UI.
-* Can add/manage CR email addresses.
-* Can have appropriate administrative access.
+# STUDENT DETAILS / ATTENDANCE SCREEN
 
-CR:
+This is where the student enters/selects their details and completes attendance.
 
-* Can start/end attendance sessions.
-* Can view attendance statistics.
-* Can manage QR lifetime.
-* Can perform existing CR attendance functions.
+Make the form extremely polished.
 
-STUDENT:
+Improve:
 
-* Can mark their own attendance through the existing student flow.
+* Input fields
+* Labels
+* Dropdowns
+* Validation
+* Error messages
+* Submit button
+* Loading state
+* Success state
 
-Backend must enforce these permissions regardless of what the frontend displays.
+Every field should clearly communicate what information is required.
 
-IMPORTANT ADMIN SECURITY:
+Validation messages should appear close to the relevant field.
 
-Do not trust a role value sent by the frontend.
+The main submission action should be obvious.
 
-The backend must derive/verify the authenticated user's role from the authenticated application identity and authoritative backend data.
+After successful attendance, provide clear visual confirmation.
 
-Do not allow a student to call the Admin API by manually constructing an HTTP request.
+---
 
-==================================================
-7. FIX FLOATING STUDENT ATTENDANCE POPUPS
------------------------------------------
+# MOBILE RESPONSIVENESS
 
-The CR attendance screen currently displays floating notifications when a student successfully marks attendance.
+This is extremely important.
 
-Example:
+Students will primarily access the QR attendance flow using their phones.
 
-"Rahul ✓"
+Do not simply shrink the desktop interface.
 
-Current animation starts only a few pixels below the top.
+Design the mobile experience intentionally.
 
-CHANGE THE ANIMATION:
+Test/consider widths such as:
 
-The student name notification should begin from the VERY BOTTOM of the visible screen and animate upward toward the TOP-RIGHT area.
+* 320px
+* 375px
+* 390px
+* 430px
 
-Desired behavior:
+Ensure:
 
-BOTTOM OF SCREEN
-↑
-↑
-↑
-↑
-↑
-TOP-RIGHT
+* No horizontal overflow
+* Buttons are easy to tap
+* Inputs are comfortable
+* Text remains readable
+* Cards don't become cramped
+* QR-related UI is easy to understand
+* Forms are easy to complete
+* Navigation works properly
 
-Example:
+Desktop should remain polished as well.
 
-[Student Name ✓]
-↑
-↑
-↑
-↑
-↑
-bottom
+---
 
-The notification should:
+# LOADING / ERROR / SUCCESS STATES
 
-* Start from below/at the bottom edge of the viewport.
-* Move smoothly upward.
-* End/disappear near the top-right area.
-* Not start a few pixels below the top.
-* Have a smooth entrance and exit.
-* Not block the main CR controls.
-* Support multiple students arriving close together without completely overlapping each other.
+Improve all existing states.
 
-Use the existing frontend notification/event mechanism if one already exists.
+### Loading
 
-Do not rewrite the entire CR UI just to change this animation.
+Use appropriate spinners/skeletons rather than blank screens.
 
-==================================================
-IMPORTANT EXISTING FUNCTIONALITY TO PRESERVE
-============================================
+### Errors
 
-Do NOT break or remove the following:
+Use professional, human-readable error messages.
 
-1. Firebase Google Authentication.
+Do not expose raw technical errors unless necessary.
 
-2. Backend Firebase ID token verification.
+### Success
 
-3. Backend-generated application JWT.
+Clearly communicate successful attendance/session actions.
 
-4. JWT stored in HttpOnly cookie.
+### Empty states
 
-5. Frontend must never read the HttpOnly JWT.
+If there are no records/sessions/students, provide a useful empty state rather than an empty blank area.
 
-6. JWT expiration remains exactly 3 minutes unless there is an existing configuration that must be preserved.
+---
 
-7. Existing CR/student authorization.
+# MICRO-INTERACTIONS
 
-8. Existing active-session/rejoin behavior.
+Add subtle animations where they improve usability.
 
-9. Only one active attendance session at a time.
+Examples:
 
-10. If multiple authorized CRs access the same active session, they must continue/rejoin the same session.
+* Button hover
+* Button press
+* Card hover
+* Form feedback
+* Modal transitions
+* Success feedback
+* Loading transitions
 
-11. Ending the session by one CR ends the shared session for all CRs.
+Keep animations subtle.
 
-12. QR token validation.
+The application should feel fast.
 
-13. QR token expiration.
+---
 
-14. CR location capture and attendance radius validation.
+# CONSISTENCY
 
-15. Student location validation.
+Create one coherent design system.
 
-16. Authoritative Google Sheet roster validation.
+If possible, create/reuse components for:
 
-17. Verified student enrollment/name association with Firebase UID.
+* Buttons
+* Cards
+* Inputs
+* Selects
+* Badges
+* Alerts
+* Modals
+* Tables
+* Headers
+* Navigation
+* Loading states
+* Empty states
 
-18. Duplicate attendance prevention.
+Do not create four completely different designs for the four interfaces.
 
-19. Backend is the source of truth for PRESENT/ABSENT.
+They should clearly feel like the same application.
 
-20. Frontend must never directly access Firestore.
+---
 
-21. Frontend must never directly access Google Sheets.
+# ACCESSIBILITY
 
-22. Existing Firestore security/architecture.
+Improve accessibility while redesigning.
 
-23. Existing Google Sheets service account architecture.
+Ensure:
 
-24. Existing CR attendance statistics/jar animation.
+* Good color contrast
+* Visible focus states
+* Proper labels
+* Keyboard accessibility
+* Buttons are actual buttons
+* Inputs have labels
+* Icons don't unnecessarily replace text
+* Status is not communicated through color alone
 
-25. Existing absentee final summary.
+---
 
-26. Existing "End Session" behavior.
+# PERFORMANCE
 
-27. Existing authentication expiration handling:
-    If the backend says the application JWT is invalid/expired, immediately treat the user as unauthenticated.
-    Do NOT show a misleading "Continue" button.
-    Clear stale frontend state and redirect/re-authenticate.
+Do not make the UI redesign unnecessarily heavy.
 
-28. Existing button spam prevention:
-    Start Session, End Session, Submit Attendance, Confirm Enrollment, and similar actions should remain disabled immediately after click while the request is being processed.
+Avoid adding large libraries or assets unless genuinely necessary.
 
-==================================================
-IMPLEMENTATION PROCESS
-======================
+Prefer the existing technology stack.
 
-STEP 1 — INSPECT FIRST
+Keep:
 
-Before changing anything:
+* Initial loading fast
+* Components lightweight
+* Animations efficient
+* Images optimized
 
-* Inspect the complete current frontend structure.
-* Inspect the complete current backend structure.
-* Locate the current authentication implementation.
-* Locate session creation/end logic.
-* Locate QR generation/refresh logic.
-* Locate attendance validation.
-* Locate Firestore models/services.
-* Locate Google Sheets service.
-* Locate CR dashboard.
-* Locate student attendance flow.
-* Locate absentee summary.
-* Locate live attendance statistics.
-* Locate the existing floating attendance notification implementation.
+---
 
-Identify exactly which files/functions need modification.
+# FINAL QUALITY CHECK
 
-Do NOT immediately rewrite files.
+After implementation, review the application as a professional UI/UX designer.
 
-STEP 2 — CREATE A CHANGE PLAN
+Check all four experiences:
 
-Before implementation, provide a concise plan containing:
+### ADMIN
 
-* Backend files to modify.
-* Frontend files to modify.
-* New API endpoints required.
-* Firestore schema changes.
-* Google Sheets changes.
-* Any environment/configuration changes.
-* Any migration/backward compatibility considerations.
+Does it look like a professional university administration dashboard?
 
-STEP 3 — IMPLEMENT INCREMENTALLY
+### CR
 
-Implement the changes without unnecessarily restructuring the project.
+Can the CR immediately understand and control an attendance session?
 
-Reuse existing services/components wherever possible.
+### STUDENT LANDING
 
-Do not create duplicate authentication, Google Sheets, Firestore, session, or QR implementations.
+Can a student immediately understand what to do after scanning the QR?
 
-STEP 4 — VALIDATE
+### STUDENT FORM
 
-After implementation, check:
+Can a student comfortably complete attendance from a mobile phone?
 
-BACKEND:
+### BRANDING
 
-* Python syntax.
-* Imports.
-* Pydantic models.
-* FastAPI routes.
-* Authentication dependencies.
-* Role authorization.
-* Firestore operations.
-* Google Sheets operations.
-* Session lifecycle.
-* QR expiration.
-* Duplicate attendance.
-* Device/IP audit logic.
+Does the Attendiffy logo appear naturally throughout the application?
 
-FRONTEND:
+### FAVICON
 
-* React compilation.
-* API requests.
-* Credentials included for cookie authentication.
-* Loading/disabled states.
-* CR UI.
-* Admin UI.
-* Student UI.
-* CSV download.
-* Clipboard copy.
-* QR lifetime controls.
-* Floating notifications.
+Does the browser tab show the Attendiffy icon instead of the Vite icon?
 
-STEP 5 — SECURITY REVIEW
+### CONSISTENCY
 
-Before considering the task complete, verify:
+Do all pages look like they belong to the same product?
 
-* No Firebase Admin credentials are exposed to frontend.
-* No Google service-account credentials are exposed to frontend.
-* No JWT is placed in localStorage/sessionStorage.
-* No JWT is placed inside QR codes.
-* No student can directly modify attendance status.
-* No student can call Admin APIs successfully.
-* No student can call CR-only APIs successfully.
-* Admin-only APIs are backend protected.
-* Google Sheet roster remains authoritative.
-* Session ID remains backend generated.
-* Session name cannot replace Session ID.
-* Device/IP information is captured server-side where possible.
-* Raw IP/device information is not unnecessarily exposed to students.
-* QR lifetime is validated by backend.
-* Existing duplicate attendance protection remains active.
+### RESPONSIVENESS
 
-==================================================
-EXPECTED RESULT
-===============
+Does everything work properly on mobile and desktop?
 
-After these changes:
+### FUNCTIONALITY
 
-CR FLOW:
+Does all existing functionality still work exactly as before?
 
-Google Login
-↓
-Authorize as CR
-↓
-Check for existing active session
-↓
-If active → Rejoin existing session
-If none → Start Session
-↓
-Enter Session Name
-↓
-Backend creates existing Session ID + Session Name
-↓
-Create session-specific Google Sheet
-↓
-Copy Sheet1 roster
-↓
-All students initially ABSENT/red
-↓
-CR displays QR
-↓
-CR can adjust QR lifetime
-↓
-Students scan QR and complete attendance
-↓
-Backend validates identity + session + QR + location + roster
-↓
-Backend records attendance
-↓
-Session Google Sheet changes student to PRESENT/green
-↓
-CR live statistics update
-↓
-Student notification floats from bottom → top-right
-↓
-Potential same-device/IP proxy situations are flagged
-↓
-CR ends session
-↓
-Backend calculates final attendance from authoritative records
-↓
-Absentees sorted by Enrollment Number ascending
-↓
-CR sees absentee list
-↓
-[Download CSV] [Copy Names]
+Fix any inconsistencies you find before considering the task complete.
 
-ADMIN FLOW:
+---
 
-Google Login
-↓
-Authorize as Admin
-↓
-Admin Dashboard
-↓
-Add New CR Email
-↓
-Backend validates Admin role
-↓
-Backend updates authoritative Firebase/Firestore admin list
-↓
-That email can subsequently authenticate as CR
+## FINAL PRINCIPLE
 
-STUDENT FLOW:
+The redesign should communicate:
 
-Google Login
-↓
-Existing verified enrollment association is checked
-↓
-If not associated → ask for last 3 enrollment digits
-↓
-Backend searches authoritative Sheet1
-↓
-If exactly one match → show verified student name
-↓
-Student confirms
-↓
-Backend associates verified enrollment/name with Firebase UID
-↓
-Future attendance does not repeatedly ask for the same information
+**Attendiffy**
 
-If multiple students have the same last 3 enrollment digits:
+### Simple. Fast. Professional Attendance.
 
-DO NOT automatically select one.
+The primary objective is not to make the application flashy.
 
-Show an appropriate message and require an unambiguous verification process.
-
-==================================================
-FINAL REQUIREMENT
-=================
-
-Keep the implementation production-oriented but simple enough to maintain.
-
-Do not introduce unnecessary libraries or architectural changes.
-
-Do not remove existing functionality.
-
-Do not silently change security behavior.
-
-If any requested feature conflicts with the existing implementation, STOP and clearly explain the conflict before making a destructive change.
-
-After implementation, provide:
-
-1. Files changed.
-2. New endpoints added.
-3. Firestore changes.
-4. Google Sheets changes.
-5. Frontend changes.
-6. Any required environment/configuration changes.
-7. Any Firebase/Google Cloud console actions required.
-8. Testing steps for CR, Admin, and Student flows.
-9. Any known limitations.
+The objective is to make it feel like a **real, polished university attendance platform that students and administrators can confidently use every day.**

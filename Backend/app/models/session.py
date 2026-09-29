@@ -28,6 +28,9 @@ class QRPayload(BaseModel):
     qr_url: str
     expires_in_seconds: int
     countdown_seconds: int
+    # True for a Permanent QR (never auto-rotates; only a manual refresh
+    # replaces it). expires_in_seconds/countdown_seconds are 0 in that case.
+    is_permanent: bool = False
 
 
 class StartAttendanceResponse(BaseModel):
