@@ -272,7 +272,7 @@ def attendance_check(
     server-side (see attendance_service.mark_attendance). IP and user-agent
     are captured from the actual HTTP request for the audit trail."""
     result = attendance_service.mark_attendance(
-        student.uid, payload, client=_client_info(request)
+        student.uid, payload, client=_client_info(request), email=student.email
     )
     return AttendanceCheckResponse(
         success=True,

@@ -19,6 +19,8 @@ export default function AdminDashboard() {
   const [notice, setNotice] = useState(null);
   // Disable "Add CR" on the first click while the request is in flight.
   const [adding, setAdding] = useState(false);
+  // Email whose × dismiss request is in flight (disables just that row).
+  const [removing, setRemoving] = useState("");
 
   const loadList = useCallback(async () => {
     try {
@@ -69,6 +71,22 @@ export default function AdminDashboard() {
       setActionError(err.message || "Could not add that CR email.");
     } finally {
       setAdding(false);
+    }
+  };
+
+  const handleRemove = async (addr) => {
+    if (removing) return; // one dismiss in flight at a time
+    setRemoving(addr);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const data = await api.removeCR(addr);
+      setNotice(data.message || `Removed ${addr} from the CR list.`);
+      await loadList();
+    } catch (err) {
+      setActionError(err.message || `Could not remove ${addr}.`);
+    } finally {
+      setRemoving("");
     }
   };
 
@@ -127,7 +145,19 @@ export default function AdminDashboard() {
           ) : (
             <ul className="admin-cr-list">
               {emails.map((addr) => (
-                <li key={addr}>{addr}</li>
+                <li key={addr}>
+                  <span className="admin-cr-email">{addr}</span>
+                  <button
+                    type="button"
+                    className="cr-remove-btn"
+                    onClick={() => handleRemove(addr)}
+                    disabled={removing === addr}
+                    aria-label={`Remove ${addr} from the CR list`}
+                    title="Dismiss this CR"
+                  >
+                    {removing === addr ? "…" : "×"}
+                  </button>
+                </li>
               ))}
             </ul>
           )}

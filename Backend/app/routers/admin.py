@@ -15,7 +15,7 @@ from app.middleware.auth import CurrentUser, require_admin
 from app.models.auth import MessageResponse
 from app.core.firebase import COLLECTION_ADMIN_LIST, get_db
 from app.services import auth_service
-from app.services.errors import BadRequestError, ConflictError
+from app.services.errors import BadRequestError, ConflictError, NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -78,3 +78,29 @@ def add_cr(
         message = "CR added successfully."
     logger.info("CR email added to admin_list by admin uid")
     return MessageResponse(success=True, message=message)
+
+
+@router.delete("/admin/cr", response_model=MessageResponse)
+def remove_cr(
+    payload: AddCRRequest,
+    admin: CurrentUser = Depends(require_admin),
+) -> MessageResponse:
+    """Dismiss (remove) a CR email from the authoritative admin_list.
+
+    Idempotent on the normalized email: the same document id used when the
+    CR was added. A caller whose role is not admin never reaches this code —
+    require_admin rejects them with 403 before the body is even parsed.
+    """
+    email = payload.normalized()
+    if not email:
+        raise BadRequestError("Specify the CR email address to remove.",
+                              code="INVALID_EMAIL")
+
+    db = get_db()
+    ref = db.collection(COLLECTION_ADMIN_LIST).document(DOC_ID_SAFE_RE.sub("_", email))
+    if not ref.get().exists:
+        raise NotFoundError("That CR email is not on the list.", code="CR_NOT_FOUND")
+
+    ref.delete()
+    logger.info("CR email removed from admin_list by admin uid")
+    return MessageResponse(success=True, message=f"Removed {email} from the CR list.")

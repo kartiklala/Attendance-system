@@ -668,6 +668,9 @@ form input:focus-visible,
   position: absolute;
   right: 18px;
   bottom: -60px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   padding: 7px 15px;
   border-radius: 999px;
   background: var(--success-bg);
@@ -678,6 +681,17 @@ form input:focus-visible,
   white-space: nowrap;
   box-shadow: 0 4px 14px rgba(26, 127, 75, 0.22);
   animation: popup-rise 4.2s ease-out forwards;
+}
+
+/* Gmail profile picture shown next to a student's name when they arrive. */
+.popup-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: var(--surface-2);
+  border: 1px solid #bfe6cd;
+  flex-shrink: 0;
 }
 
 @keyframes popup-rise {
@@ -1138,6 +1152,41 @@ form input:focus-visible,
   border-radius: 50%;
   background: var(--gold-500);
   flex-shrink: 0;
+}
+
+.admin-cr-email {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* × dismiss control on each CR row (admin dashboard). */
+.cr-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.cr-remove-btn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: var(--danger-bg, #fdecea);
+}
+
+.cr-remove-btn:disabled {
+  opacity: 0.55;
+  cursor: wait;
 }
 
 /* ---- Responsive ---------------------------------------------------------- */

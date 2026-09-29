@@ -52,7 +52,7 @@ export default function CRDashboard() {
   const [session, setSession] = useState(null); // { session_id, qr: {...} }
   const [stats, setStats] = useState(null);     // backend jar-fill data
   const [summary, setSummary] = useState(null); // backend end-of-session data
-  const [popups, setPopups] = useState([]);     // "Rahul Sharma ✓" floats
+  const [popups, setPopups] = useState([]);     // "Rahul Sharma ✓" floats (+ Gmail avatar)
   const [countdown, setCountdown] = useState(0);
   const [startProgress, setStartProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -124,7 +124,10 @@ export default function CRDashboard() {
             if (!seenRef.current.has(key)) {
               seenRef.current.add(key);
               const id = `${key}|${Date.now()}`;
-              setPopups((current) => [...current.slice(-5), { id, name: event.name }]);
+              setPopups((current) => [
+                ...current.slice(-5),
+                { id, name: event.name, photo: event.photo || "" },
+              ]);
               setTimeout(
                 () => setPopups((current) => current.filter((p) => p.id !== id)),
                 POPUP_LIFETIME_MS
@@ -412,6 +415,21 @@ export default function CRDashboard() {
           className="present-popup"
           style={{ animationDelay: `${index * 0.18}s` }}
         >
+          {popup.photo && (
+            <img
+              className="popup-avatar"
+              src={popup.photo}
+              alt=""
+              width={24}
+              height={24}
+              referrerPolicy="no-referrer"
+              onError={(e) => {
+                // Non-Google accounts / fetch failure: drop the avatar and
+                // keep the plain "name ✓" popup.
+                e.currentTarget.remove();
+              }}
+            />
+          )}
           {popup.name} ✓
         </div>
       ))}

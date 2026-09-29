@@ -20,6 +20,7 @@ import hashlib
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.firebase import COLLECTION_ATTENDANCE, COLLECTION_SESSIONS, get_db
@@ -44,7 +45,24 @@ def derive_device_hash(client_ip: str, user_agent: str) -> str:
     return hashlib.sha256(seed).hexdigest()[:16]
 
 
-def mark_attendance(student_uid: str, payload, client: dict | None = None) -> dict:
+def _profile_photo_url(email: str) -> str:
+    """Google account profile-picture URL for an email ("" when unknown).
+
+    This is the public, deterministic avatar endpoint Google provides for
+    Workspace/Gmail addresses; the CR dashboard shows it in the arrival
+    popup exactly like it used to. No extra storage — derived from the
+    email recorded at check-in (server-observed, never from the body)."""
+    email = str(email or "").strip().lower()
+    if not email:
+        return ""
+    return (
+        "https://www.google.com/search/photo?"
+        f"auto=webp&sz=96&email={quote(email, safe='')}"
+    )
+
+
+def mark_attendance(student_uid: str, payload, client: dict | None = None,
+                    email: str = "") -> dict:
     """Validate everything and mark the student PRESENT.
 
     `payload` is an AttendanceCheckRequest (session_token + coordinates).
@@ -108,6 +126,7 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None) -> di
         "student_uid": student_uid,
         "name": roster_name,
         "enrollment_no": roster_enrollment,
+        "email": (email or "").strip().lower(),
         "status": "PRESENT",
         "marked_at": marked_at_iso,
         "distance_meters": round(distance, 2),
@@ -212,7 +231,14 @@ def get_session_stats(session_id: str) -> dict:
     entries = [doc.to_dict() or {} for doc in present_docs]
     entries.sort(key=lambda d: str(d.get("marked_at", "")), reverse=True)
     recent = [
-        {"name": d.get("name", ""), "marked_at": str(d.get("marked_at", ""))}
+        {
+            "name": d.get("name", ""),
+            "marked_at": str(d.get("marked_at", "")),
+            # Gmail/Google profile picture for the arrival popup. Derived
+            # server-side from the verified account email; older records
+            # (no email stored) simply get "" and show the plain popup.
+            "photo": _profile_photo_url(d.get("email", "")),
+        }
         for d in entries[:10]
     ]
 

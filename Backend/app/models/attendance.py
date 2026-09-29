@@ -73,6 +73,9 @@ class AttendanceCheckResponse(BaseModel):
 class PresentEvent(BaseModel):
     name: str
     marked_at: str
+    # Google profile-picture URL for the arrival popup ("" for records that
+    # predate email capture — the frontend then shows the plain popup).
+    photo: str = ""
 
 
 class SessionStats(BaseModel):

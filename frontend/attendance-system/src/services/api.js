@@ -204,4 +204,9 @@ export const listCRs = () => request("/admin/cr");
 export const addCR = (email) =>
   request("/admin/cr", { method: "POST", body: { email } });
 
+// Dismiss a CR from the authoritative list. Admin-only: the backend
+// verifies the role from the signed JWT before touching Firestore.
+export const removeCR = (email) =>
+  request("/admin/cr", { method: "DELETE", body: { email } });
+
 export default request;
