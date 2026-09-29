@@ -1,9 +1,25 @@
 // Small shared UI building blocks.
+import logoUrl from "../assets/attendiffy.jpg";
+
+// Attendiffy circular badge, cropped to the navy emblem. Visual branding only.
+export function BrandMark({ size = 56, className = "" }) {
+  return (
+    <img
+      className={`brand-badge ${className}`.trim()}
+      src={logoUrl}
+      width={size}
+      height={size}
+      alt="Attendify"
+      draggable="false"
+    />
+  );
+}
 
 export function Loading({ label = "Loading…" }) {
   return (
     <div className="page-center">
       <div className="card loading-card">
+        <BrandMark size={52} />
         <div className="spinner" aria-hidden="true" />
         <p>{label}</p>
       </div>

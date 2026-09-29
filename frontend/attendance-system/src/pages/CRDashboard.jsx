@@ -24,6 +24,11 @@ const POPUP_LIFETIME_MS = 4200;
 // manual refresh changes it).
 const QR_LIFETIME_PERMANENT = 0;
 const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
+// Sentinel lifetime for a QR that never auto-expires (mirrors the backend
+// settings.QR_PERMANENT_LIFETIME_SECONDS). Selected from the dropdown as
+// "Permanent"; only the manual Refresh control replaces it.
+const QR_LIFETIME_PERMANENT = 0;
+const isPermanentQr = (qr) => !!qr && (qr.is_permanent === true || qr.expires_in_seconds === 0);
 
 // A QR payload is "Permanent" when the backend flags it or reports a 0s life.
 const isPermanentQr = (qr) =>
@@ -56,7 +61,7 @@ export default function CRDashboard() {
   const [session, setSession] = useState(null); // { session_id, qr: {...} }
   const [stats, setStats] = useState(null);     // backend jar-fill data
   const [summary, setSummary] = useState(null); // backend end-of-session data
-  const [popups, setPopups] = useState([]);     // "Rahul Sharma ✓" floats
+  const [popups, setPopups] = useState([]);     // "Rahul Sharma ✓" floats (+ Gmail avatar)
   const [countdown, setCountdown] = useState(0);
   const [startProgress, setStartProgress] = useState(0);
   const [error, setError] = useState(null);
@@ -195,6 +200,23 @@ export default function CRDashboard() {
       }, 1000);
     },
     [showFinalSummary]
+  );
+
+  // Drive the countdown only for timed QRs. A Permanent QR must never
+  // auto-rotate, so we stop its clock and surface the manual Refresh instead.
+  const applyQrClock = useCallback(
+    (sessionId, qr) => {
+      if (isPermanentQr(qr)) {
+        stopQrClock();
+        setCountdown(0);
+        return;
+      }
+      startClock(
+        sessionId,
+        qr.countdown_seconds || qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
+      );
+    },
+    [startClock, stopQrClock]
   );
 
   // On mount (and after re-authorization): rejoin the shared active session
@@ -591,11 +613,27 @@ export default function CRDashboard() {
       <div className="page-center">
         <div className="card cr-card">
           <header className="cr-header">
-            <div>
-              <h1 className="app-title">Student Attendance System</h1>
-              <p className="app-subtitle">
-                Welcome, {profile?.name || profile?.email || "CR"}
-              </p>
+            <div className="brand-lockup brand-lockup-row">
+              <BrandMark size={44} />
+              <div className="brand-text">
+                <h1 className="app-title brand-name">Attendify</h1>
+                <p className="app-subtitle">
+                  Welcome, {profile?.name || profile?.email || "CR"}
+                </p>
+              </div>
+            </div>
+            <div className="header-actions">
+              {role === "admin" && (
+                <button
+                  className="btn btn-ghost btn-small"
+                  onClick={() => navigate("/admin")}
+                >
+                  Admin Dashboard
+                </button>
+              )}
+              <button className="btn btn-ghost btn-small" onClick={logout}>
+                Sign out
+              </button>
             </div>
             <div className="cr-header-actions">
               {role === "admin" && (

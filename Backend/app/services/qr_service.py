@@ -52,6 +52,24 @@ def _iso(dt: datetime) -> str:
     return dt.isoformat()
 
 
+def _permanent_expiry(now: datetime) -> datetime:
+    # Effectively never: a Permanent QR only changes when the CR refreshes it.
+    return now + timedelta(days=36500)
+
+
+def _lifetime_from(data: dict) -> int:
+    """Read the session's configured QR lifetime, PRESERVING 0 (Permanent).
+    Never use `value or default` here — that would silently turn Permanent
+    back into the default lifetime."""
+    raw = data.get("qr_lifetime_seconds")
+    if raw is None:
+        return settings.QR_TOKEN_LIFETIME_SECONDS
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return settings.QR_TOKEN_LIFETIME_SECONDS
+
+
 def _parse(dt_value) -> datetime | None:
     if not dt_value:
         return None
@@ -220,7 +238,7 @@ def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
             doc_data = old_snapshot.to_dict() or {}
             if doc_data.get("active") and doc_data.get("token"):
                 return _payload(doc_data["token"], session_id,
-                                doc_data.get("expires_at"), lifetime)
+                                doc_data.get("expires_at"), lifetime, is_permanent)
 
         raw = secrets.token_urlsafe(24)  # cryptographically random
         token_hash = _hash_token(raw)
@@ -242,8 +260,9 @@ def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
             "current_qr_hash": token_hash,
             "current_qr_expires_at": _iso(expires_at),
         })
-        logger.info("QR generated session_id=%s lifetime=%ss", session_id, lifetime)
-        return _payload(raw, session_id, _iso(expires_at), lifetime)
+        logger.info("QR generated session_id=%s lifetime=%ss permanent=%s force=%s",
+                    session_id, lifetime, is_permanent, force)
+        return _payload(raw, session_id, _iso(expires_at), lifetime, is_permanent)
 
     return _txn(db.transaction())
 

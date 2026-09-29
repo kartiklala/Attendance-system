@@ -568,6 +568,7 @@ function StudentCard({ title, body, hint, children }) {
       <div className="student-shell">
         <SignOutChip />
         <div className="card student-card">
+          <BrandMark size={54} className="brand-student" />
           {title && <h1 className="app-title">{title}</h1>}
           {body && <p>{body}</p>}
           {hint && <p className="muted hint">{hint}</p>}

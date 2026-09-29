@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox, GoogleIcon } from "../components/ui";
+import { ErrorBox, GoogleIcon, BrandMark } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 export default function Login() {
@@ -57,8 +57,14 @@ export default function Login() {
 
   return (
     <div className="page-center">
-      <div className="card">
-        <h1 className="app-title">Attendify Attendance System</h1>
+      <div className="card login-card">
+        <div className="brand-lockup">
+          <BrandMark size={64} />
+          <div className="brand-text">
+            <h1 className="app-title brand-name">Attendify</h1>
+            <p className="brand-tag">Attendance Tracker &amp; Management</p>
+          </div>
+        </div>
         <p className="app-subtitle">Sign in with your Google account</p>
 
         <div className={`location-status ${locationState}`}>
