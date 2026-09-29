@@ -199,7 +199,6 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         "attempt_id": attempt.get("attempt_id", ""),
         "name": roster_name,
         "enrollment_no": roster_enrollment,
-        "email": (email or "").strip().lower(),
         "status": "PRESENT",
         "marked_at": marked_at_iso,
         "distance_meters": round(distance, 2),
@@ -279,29 +278,6 @@ def _uid_already_marked(session_id: str, student_uid: str) -> bool:
         .stream()
     )
     return any(True for _ in docs)
-
-
-def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
-    """Enrollments already recorded this session on the SAME device_hash.
-
-    device_hash is sha256(client_ip + user_agent), so a match means the same
-    browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
-    filter needs no composite index. Includes the just-written record."""
-    if not device_hash:
-        return []
-    docs = (
-        get_db()
-        .collection(COLLECTION_ATTENDANCE)
-        .where("session_id", "==", session_id)
-        .where("device_hash", "==", device_hash)
-        .stream()
-    )
-    enrollments: list[str] = []
-    for doc in docs:
-        enrollment = str((doc.to_dict() or {}).get("enrollment_no", "")).strip()
-        if enrollment:
-            enrollments.append(enrollment)
-    return enrollments
 
 
 # ---- Live statistics (water fill + present popups + proxy warnings) --------

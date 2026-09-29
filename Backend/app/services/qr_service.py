@@ -85,12 +85,6 @@ def build_qr_url(token: str) -> str:
     return f"{base}/attendance?token={token}"
 
 
-def _permanent_expiry(now: datetime) -> datetime:
-    """A Permanent QR has no practical expiry: far-future so it is never
-    rotated automatically (only via the CR's manual refresh)."""
-    return now + timedelta(days=36500)  # ~100 years
-
-
 def _payload(raw_token: str, session_id: str, expires_at, lifetime_seconds: int) -> dict:
     try:
         lifetime = int(lifetime_seconds)
@@ -222,6 +216,9 @@ def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
                         if raw_lifetime is None else int(raw_lifetime))
         except (TypeError, ValueError):
             lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
+        # `_payload` also derives permanence from `lifetime`, but the branch
+        # below and the log line need it as a local, so compute it once here.
+        is_permanent = lifetime == settings.QR_PERMANENT_LIFETIME_SECONDS
 
         # Firestore transactions require ALL reads before ANY write, so the
         # old token document is fetched up-front and reused below.
@@ -238,11 +235,11 @@ def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
             doc_data = old_snapshot.to_dict() or {}
             if doc_data.get("active") and doc_data.get("token"):
                 return _payload(doc_data["token"], session_id,
-                                doc_data.get("expires_at"), lifetime, is_permanent)
+                                doc_data.get("expires_at"), lifetime)
 
         raw = secrets.token_urlsafe(24)  # cryptographically random
         token_hash = _hash_token(raw)
-        if lifetime == settings.QR_PERMANENT_LIFETIME_SECONDS:
+        if is_permanent:
             expires_at = _permanent_expiry(now)
         else:
             expires_at = now + timedelta(seconds=lifetime)
@@ -262,7 +259,7 @@ def _rotate_qr(db, session_id: str, force: bool = False) -> dict:
         })
         logger.info("QR generated session_id=%s lifetime=%ss permanent=%s force=%s",
                     session_id, lifetime, is_permanent, force)
-        return _payload(raw, session_id, _iso(expires_at), lifetime, is_permanent)
+        return _payload(raw, session_id, _iso(expires_at), lifetime)
 
     return _txn(db.transaction())
 

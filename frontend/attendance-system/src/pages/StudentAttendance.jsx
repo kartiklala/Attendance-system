@@ -29,7 +29,7 @@ import {
   saveAttendanceAttempt,
 } from "../services/auth";
 import { attendanceLog } from "../utils/authLog";
-import { ErrorBox } from "../components/ui";
+import { BrandMark, ErrorBox } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 const formatMMSS = (seconds) =>

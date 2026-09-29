@@ -10,7 +10,7 @@ import { useNavigate } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import * as api from "../services/api";
 import { useAuth } from "../context/AuthContext";
-import { ErrorBox, GoogleIcon, ProgressBar } from "../components/ui";
+import { BrandMark, ErrorBox, GoogleIcon, ProgressBar } from "../components/ui";
 import { getCurrentLocation } from "../utils/geolocation";
 
 const REFRESH_SECONDS_FALLBACK = 10;
@@ -24,11 +24,6 @@ const POPUP_LIFETIME_MS = 4200;
 // manual refresh changes it).
 const QR_LIFETIME_PERMANENT = 0;
 const QR_LIFETIME_OPTIONS = [5, 10, 15, 20, 30, 60];
-// Sentinel lifetime for a QR that never auto-expires (mirrors the backend
-// settings.QR_PERMANENT_LIFETIME_SECONDS). Selected from the dropdown as
-// "Permanent"; only the manual Refresh control replaces it.
-const QR_LIFETIME_PERMANENT = 0;
-const isPermanentQr = (qr) => !!qr && (qr.is_permanent === true || qr.expires_in_seconds === 0);
 
 // A QR payload is "Permanent" when the backend flags it or reports a 0s life.
 const isPermanentQr = (qr) =>
