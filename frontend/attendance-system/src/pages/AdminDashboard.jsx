@@ -114,17 +114,6 @@ export default function AdminDashboard() {
           </div>
         </div>
 
-        {/* Admins inherit every CR capability, so offer a direct entry. */}
-        <div className="admin-role-nav">
-          <button
-            type="button"
-            className="btn btn-primary btn-small"
-            onClick={() => navigate("/cr")}
-          >
-            Open CR Dashboard
-          </button>
-        </div>
-
         <section className="admin-section">
           <h2 className="section-title">Add New CR</h2>
           <form className="admin-add-form" onSubmit={handleAdd}>

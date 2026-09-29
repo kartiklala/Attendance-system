@@ -421,17 +421,20 @@ form input:focus-visible,
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   width: 100%;
   text-align: left;
 }
 
-/* Header action cluster (Admins get a "Admin Dashboard" button beside Sign out). */
-.cr-header-actions {
+/* Header action cluster (shared by the CR and admin dashboards). */
+.cr-header-actions,
+.header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* Admin dashboard cross-navigation to the inherited CR area. */
@@ -1238,12 +1241,6 @@ form input:focus-visible,
   cursor: not-allowed;
 }
 
-/* ---- Responsive ----------------------------------------------------------- */
-@media (max-width: 480px) {
-  .popup-layer {
-    right: 0;
-  }
-
 .admin-cr-list li::before {
   content: "";
   width: 8px;
@@ -1333,6 +1330,7 @@ form input:focus-visible,
     font-size: 0.8rem;
   }
 
+  .cr-header-actions,
   .header-actions {
     flex-direction: column;
     align-items: flex-end;

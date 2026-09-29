@@ -197,23 +197,6 @@ export default function CRDashboard() {
     [showFinalSummary]
   );
 
-  // Drive the countdown only for timed QRs. A Permanent QR must never
-  // auto-rotate, so we stop its clock and surface the manual Refresh instead.
-  const applyQrClock = useCallback(
-    (sessionId, qr) => {
-      if (isPermanentQr(qr)) {
-        stopQrClock();
-        setCountdown(0);
-        return;
-      }
-      startClock(
-        sessionId,
-        qr.countdown_seconds || qr.expires_in_seconds || REFRESH_SECONDS_FALLBACK
-      );
-    },
-    [startClock, stopQrClock]
-  );
-
   // On mount (and after re-authorization): rejoin the shared active session
   // if the backend says one exists — the backend is the source of truth.
   useEffect(() => {
@@ -616,19 +599,6 @@ export default function CRDashboard() {
                   Welcome, {profile?.name || profile?.email || "CR"}
                 </p>
               </div>
-            </div>
-            <div className="header-actions">
-              {role === "admin" && (
-                <button
-                  className="btn btn-ghost btn-small"
-                  onClick={() => navigate("/admin")}
-                >
-                  Admin Dashboard
-                </button>
-              )}
-              <button className="btn btn-ghost btn-small" onClick={logout}>
-                Sign out
-              </button>
             </div>
             <div className="cr-header-actions">
               {role === "admin" && (
