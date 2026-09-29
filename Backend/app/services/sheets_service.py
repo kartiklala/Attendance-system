@@ -34,6 +34,12 @@ def _rgba(red: float, green: float, blue: float) -> dict:
 GREEN = _rgba(0.13, 0.55, 0.13)   # PRESENT background
 RED = _rgba(0.80, 0.12, 0.12)     # ABSENT background
 WHITE = _rgba(1.0, 1.0, 1.0)      # bold text on a coloured background
+AMBER = _rgba(0.98, 0.75, 0.14)   # Remarks background for a proxy flag
+
+# Remark text written next to a student's name when their attendance looks
+# proxied. Triggered ONLY by a shared device_hash (same IP + same browser),
+# never by a shared IP alone — a whole class on one Wi-Fi router is legitimate.
+REMARK_PROXY = "Proxy detected"
 
 
 def _get_client() -> gspread.Client:
@@ -123,9 +129,11 @@ def fetch_student_roster() -> list[tuple[str, str]]:
 
 # ---- Per-session worksheets -----------------------------------------------
 #
-# One tab per attendance session: "Enrollment ID | Student Name | Status".
-# Sheet1 stays the untouched master roster. These calls are best-effort from
-# the session/attendance services — Firestore remains the source of truth.
+# One tab per attendance session:
+# "Enrollment ID | Student Name | Status | Remarks". Sheet1 stays the untouched
+# master roster. Remarks is blank normally and gets a "Proxy detected" flag when
+# the same browser + same IP marks two or more students. These calls are
+# best-effort from the session/attendance services — Firestore is the source.
 
 _SESSION_SHEET_PREFIX = "ATT_"
 _UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
@@ -178,10 +186,10 @@ def create_session_sheet(session_id: str, session_name: str,
 
     try:
         sheet = spreadsheet.add_worksheet(
-            title=title, rows=max(len(roster) + 1, 2), cols=3
+            title=title, rows=max(len(roster) + 1, 2), cols=4
         )
-        body = [["Enrollment ID", "Student Name", "Status"]]
-        body += [[enr, name, "ABSENT"] for enr, name in roster]
+        body = [["Enrollment ID", "Student Name", "Status", "Remarks"]]
+        body += [[enr, name, "ABSENT", ""] for enr, name in roster]
         requests = [
             {
                 # Column A as plain text protects leading zeros.
@@ -250,6 +258,22 @@ def _remember_rows(title: str, roster: list[tuple[str, str]]) -> None:
     }
 
 
+def _resolve_row(sheet, sheet_title: str, enrollment_no: str,
+                 row: int | None = None) -> int | None:
+    """1-based worksheet row for an enrollment: caller-supplied, else the
+    seeding cache, else a MATCH formula lookup. Returns None if not found."""
+    target = row or _session_rows.get(sheet_title, {}).get(
+        _norm_enrollment(enrollment_no)
+    )
+    if target is not None:
+        return int(target)
+    found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
+    raw = str(found[0][0]).strip() if found and found[0] else ""
+    if not raw or not raw.replace(".0", "").isdigit():
+        return None
+    return int(float(raw))
+
+
 def mark_student_present(sheet_title: str, enrollment_no: str,
                          row: int | None = None) -> None:
     """Flip one student's Status cell to PRESENT in the session worksheet.
@@ -262,21 +286,13 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
     try:
         spreadsheet = _open_spreadsheet()
         sheet = spreadsheet.worksheet(sheet_title)
-        target = row or _session_rows.get(sheet_title, {}).get(
-            _norm_enrollment(enrollment_no)
-        )
+        target = _resolve_row(sheet, sheet_title, enrollment_no, row)
         if target is None:
-            # Exact match on the raw enrollment value; "" means not found.
-            found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
-            raw = str(found[0][0]).strip() if found and found[0] else ""
-            if not raw or not raw.replace(".0", "").isdigit():
-                logger.warning("Enrollment not found on session sheet title=%s",
-                               sheet_title)
-                return
-            target = int(float(raw))
+            logger.warning("Enrollment not found on session sheet title=%s",
+                           sheet_title)
+            return
         # Flip this student's Status cell to PRESENT AND paint its background
         # green (from the seeded red) in a single spreadsheet-level batchUpdate.
-        target = int(target)
         requests = [{
             "updateCells": {
                 "range": {"sheetId": sheet.id,
@@ -297,3 +313,48 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):
         logger.exception("Could not mark PRESENT on the session sheet title=%s", sheet_title)
+
+
+def flag_proxy_remarks(sheet_title: str, enrollments: list[str]) -> None:
+    """Write REMARK_PROXY into the Remarks column (D) for every enrollment
+    given — all students sharing one device_hash (same browser + same IP).
+
+    Called only when the backend has confirmed two or more distinct students on
+    that device_hash, so a shared Wi-Fi router (same IP, different browsers)
+    never triggers it. Best-effort: failures are logged, never raised upward."""
+    if not enrollments:
+        return
+    try:
+        spreadsheet = _open_spreadsheet()
+        sheet = spreadsheet.worksheet(sheet_title)
+        requests = []
+        seen_rows: set[int] = set()
+        for enrollment in enrollments:
+            target = _resolve_row(sheet, sheet_title, enrollment)
+            if target is None or target in seen_rows:
+                continue
+            seen_rows.add(target)
+            requests.append({
+                "updateCells": {
+                    "range": {"sheetId": sheet.id,
+                              "startRowIndex": target - 1, "endRowIndex": target,
+                              "startColumnIndex": 3, "endColumnIndex": 4},
+                    "rows": [{"values": [{
+                        "userEnteredValue": {"stringValue": REMARK_PROXY},
+                        "userEnteredFormat": {
+                            "backgroundColor": AMBER,
+                            "textFormat": {"bold": True},
+                        },
+                    }]}],
+                    "fields": "userEnteredValue,userEnteredFormat",
+                }
+            })
+        if requests:
+            spreadsheet.batch_update({"requests": requests})
+            logger.info("Proxy remarks written title=%s rows=%s",
+                        sheet_title, len(requests))
+    except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
+        logger.warning("Session sheet is missing title=%s", sheet_title)
+    except (GSpreadException, APIError):
+        logger.exception("Could not write proxy remarks on the session sheet title=%s",
+                         sheet_title)
