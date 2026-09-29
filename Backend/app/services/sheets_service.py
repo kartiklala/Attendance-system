@@ -6,8 +6,9 @@ Worksheets inside the configured spreadsheet:
 - settings.GOOGLE_SHEET_NAME: attendance log
   (columns: Timestamp | Enrollment No | Student Name | Status | Session-ID)
 - one worksheet PER SESSION (created on session start): a copy of the roster
-  with a Status column, ABSENT/red initially and PRESENT/green once the
-  backend records valid attendance.
+  with a Status column (ABSENT/red initially, PRESENT/green once the backend
+  records valid attendance) and a Remarks column (blank normally, "Proxy
+  detected" when the same browser + same IP marks two or more students).
 """
 import logging
 import re
@@ -97,8 +98,8 @@ def ensure_attendance_headers() -> None:
     values = sheet.get_values("A1:E1")
     if not values or not values[0] or not values[0][0]:
         sheet.update(
-            "A1:E1",
-            [["Timestamp", "Enrollment No", "Student Name", "Status", "Session-ID"]],
+            range_name="A1:E1",
+            values=[["Timestamp", "Enrollment No", "Student Name", "Status", "Session-ID"]],
         )
 
 
@@ -140,9 +141,9 @@ _UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
 
 # sheet_title -> {normalized enrollment: 1-based worksheet row}, remembered when
 # a tab is seeded. The tab IS the roster order, so this map is exact: every
-# student marked present in the same process avoids a full-column MATCH against
+# student marked present in the same process avoids a full-column read against
 # the Sheets API. It is an optimization only — an unknown title (e.g. after a
-# server restart) simply falls back to the formula lookup.
+# server restart) simply falls back to a column-A value search.
 _session_rows: dict[str, dict[str, int]] = {}
 _SESSION_ROW_CACHE_MAX = 25
 
@@ -176,10 +177,13 @@ def create_session_sheet(session_id: str, session_name: str,
         roster = fetch_student_roster()
     title = session_sheet_title(session_id, session_name)
 
-    # Idempotent: an existing tab (retry / duplicate submit) is reused as-is.
+    # Idempotent: an existing tab (retry / duplicate submit) is reused, and a
+    # tab created before the Remarks column existed is upgraded so the column
+    # is always present for this session.
     try:
-        spreadsheet.worksheet(title)
+        existing = spreadsheet.worksheet(title)
         logger.info("Session sheet already exists title=%s", title)
+        _ensure_remarks_column(existing)
         return title
     except gspread.WorksheetNotFound:
         pass
@@ -258,20 +262,53 @@ def _remember_rows(title: str, roster: list[tuple[str, str]]) -> None:
     }
 
 
+def _ensure_remarks_column(sheet) -> None:
+    """Backfill the 4th 'Remarks' column on a session tab that predates this
+    feature (3-column layout). Idempotent and best-effort — a failure here
+    must never block a session from starting or joining."""
+    try:
+        if sheet.col_count < 4:
+            sheet.add_cols(4 - sheet.col_count)
+        header = (sheet.get_values("A1:D1") or [[]])[0]
+        current = str(header[3]).strip().lower() if len(header) >= 4 else ""
+        if current == "remarks":
+            return
+        sheet.update(range_name="D1", values=[["Remarks"]])
+        try:
+            sheet.format("D1", {"textFormat": {"bold": True}})
+        except (GSpreadException, APIError):
+            pass
+        logger.info("Backfilled Remarks column title=%s", sheet.title)
+    except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
+        logger.warning("Session sheet missing while ensuring Remarks column")
+    except (GSpreadException, APIError):
+        logger.exception("Could not ensure Remarks column title=%s", sheet.title)
+
+
 def _resolve_row(sheet, sheet_title: str, enrollment_no: str,
                  row: int | None = None) -> int | None:
     """1-based worksheet row for an enrollment: caller-supplied, else the
-    seeding cache, else a MATCH formula lookup. Returns None if not found."""
+    seeding cache, else a scan of column A. Returns None if not found."""
     target = row or _session_rows.get(sheet_title, {}).get(
         _norm_enrollment(enrollment_no)
     )
     if target is not None:
         return int(target)
-    found = sheet.formula(f'=IFERROR(MATCH("{enrollment_no}",A:A,0),"")')
-    raw = str(found[0][0]).strip() if found and found[0] else ""
-    if not raw or not raw.replace(".0", "").isdigit():
+    key = _norm_enrollment(enrollment_no)
+    if not key:
         return None
-    return int(float(raw))
+    # Cache miss (e.g. after a server restart). gspread's Worksheet has no
+    # formula() method, so a MATCH formula cannot be evaluated client-side —
+    # read column A and locate the enrollment value directly instead.
+    try:
+        column_a = sheet.col_values(1)
+    except (GSpreadException, APIError):
+        logger.exception("Could not read column A title=%s", sheet_title)
+        return None
+    for index, value in enumerate(column_a, start=1):
+        if _norm_enrollment(value) == key:
+            return index
+    return None
 
 
 def mark_student_present(sheet_title: str, enrollment_no: str,
@@ -281,7 +318,7 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
 
     `row` is the 1-based worksheet row the caller already knows. When it is not
     supplied, the row remembered from seeding this tab is used; only when that
-    is unknown too does the service fall back to the MATCH formula lookup.
+    is unknown too does the service fall back to a column-A value search.
     """
     try:
         spreadsheet = _open_spreadsheet()
