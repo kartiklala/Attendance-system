@@ -1,4 +1,4 @@
-"""Admin routes: manage the authoritative CR list (POST/GET /admin/cr).
+"""Admin routes: manage the authoritative CR list (POST/GET/DELETE /admin/cr).
 
 The role of the caller is verified from the backend-signed application JWT —
 a student or CR crafting this request manually is rejected (ADMIN_ONLY).
@@ -80,27 +80,23 @@ def add_cr(
     return MessageResponse(success=True, message=message)
 
 
-@router.delete("/admin/cr", response_model=MessageResponse)
+@router.delete("/admin/cr/{email}", response_model=MessageResponse)
 def remove_cr(
-    payload: AddCRRequest,
+    email: str,
     admin: CurrentUser = Depends(require_admin),
 ) -> MessageResponse:
-    """Dismiss (remove) a CR email from the authoritative admin_list.
+    """Admin-only: remove a CR email from the authoritative admin_list.
 
-    Idempotent on the normalized email: the same document id used when the
-    CR was added. A caller whose role is not admin never reaches this code —
-    require_admin rejects them with 403 before the body is even parsed.
-    """
-    email = payload.normalized()
-    if not email:
-        raise BadRequestError("Specify the CR email address to remove.",
+    The document id is the normalized email (same scheme as add_cr), so the
+    lookup is exact. Removing a non-existent CR is a 404 rather than silent."""
+    target = auth_service.normalize_email(email)
+    if not target or not auth_service.is_valid_email(target):
+        raise BadRequestError("Please enter a valid email address.",
                               code="INVALID_EMAIL")
-
     db = get_db()
-    ref = db.collection(COLLECTION_ADMIN_LIST).document(DOC_ID_SAFE_RE.sub("_", email))
+    ref = db.collection(COLLECTION_ADMIN_LIST).document(DOC_ID_SAFE_RE.sub("_", target))
     if not ref.get().exists:
-        raise NotFoundError("That CR email is not on the list.", code="CR_NOT_FOUND")
-
+        raise NotFoundError("That CR email was not found.", code="CR_NOT_FOUND")
     ref.delete()
     logger.info("CR email removed from admin_list by admin uid")
-    return MessageResponse(success=True, message=f"Removed {email} from the CR list.")
+    return MessageResponse(success=True, message="CR removed successfully.")

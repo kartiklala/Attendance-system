@@ -1,584 +1,611 @@
-I want you to significantly improve the overall UI/UX of my existing attendance web application, **Attendiffy**.
+I need you to investigate and FIX a recurring Google Sign-In issue in my application.
 
-The application is already functional. This task is primarily a **UI/UX and visual redesign**.
+## The exact problem
 
-The application is a QR-based student attendance system with 4 main interfaces:
+The Google OAuth flow itself appears to work:
 
-1. Admin Dashboard
-2. CR (Class Representative) Screen
-3. Student Landing Screen — where students arrive after scanning the QR
-4. Student Details / Attendance Screen — where students enter their details and complete attendance
+1. User opens the application.
+2. User clicks **Sign in with Google**.
+3. Google account selector opens.
+4. User selects their Google account.
+5. Google authentication completes.
+6. User is redirected back to my application.
+7. The application checks the authentication state.
+8. **The application says the user is signed out and shows the Google Sign-In button again.**
 
----
+This happens consistently.
 
-# VERY IMPORTANT — DO NOT BREAK EXISTING FUNCTIONALITY
+## IMPORTANT: Existing console evidence
 
-Before making any changes, inspect and understand the existing codebase.
+There are already debug logs in the application. After completing Google Sign-In and returning to the application, these are the actual logs:
 
-Do NOT rebuild the application from scratch.
+```text
+[AUTH] initialization started {returnedFromRedirect: true}
+[AUTH] initialization started {returnedFromRedirect: true}
 
-Do NOT unnecessarily modify:
+[AUTH] auth state deferred until redirect completes {hasUser: false}
 
-* Authentication
-* Google Sign-In
-* QR generation/scanning
-* Attendance logic
-* Database operations
-* API calls
-* Routing
-* Session management
-* Student verification
-* Admin permissions
-* CR permissions
-* Existing business logic
+[AUTH] redirect result checked {
+  pathname: '/',
+  returnedFromRedirect: true,
+  resolvedUser: false
+}
 
-The goal is:
+[AUTH] redirect result checked {
+  pathname: '/',
+  returnedFromRedirect: true,
+  resolvedUser: false
+}
 
-**Existing functionality + significantly better UI/UX**
+[AUTH] auth state: signed out
+```
 
-Do not change application behavior just to achieve a visual redesign.
+These logs are extremely important.
 
----
-
-# STEP 1 — ANALYZE THE EXISTING APPLICATION
-
-First inspect the entire frontend codebase.
-
-Identify:
-
-* Framework
-* Styling system
-* Component structure
-* Routing
-* Authentication-related UI
-* Admin pages
-* CR pages
-* Student pages
-* QR attendance flow
-* Existing reusable components
-* Existing logo/branding
-* Existing responsive behavior
-
-Understand how the current UI works before modifying it.
-
-Before implementation, briefly summarize:
-
-1. Current UI architecture
-2. Main screens/components discovered
-3. Current styling approach
-4. Major visual/UX issues
-5. Proposed redesign direction
-
-Then implement the redesign.
+Do NOT ignore them and do NOT simply add another workaround.
 
 ---
 
-# STEP 2 — NEW BRANDING / LOGO
+# What I want you to investigate
 
-I have provided the application's logo here:
+Trace exactly why this happens:
 
-`C:\Users\This Pc\Desktop\attendance_roaster\frontend\attendance-system\src\assets\attendiffy.jpg`
+```text
+Google authentication
+        ↓
+redirect back to application
+        ↓
+returnedFromRedirect = true
+        ↓
+auth state is deferred
+        ↓
+getRedirectResult() reports resolvedUser = false
+        ↓
+auth state becomes "signed out"
+```
 
-This is the **Attendiffy logo**.
+The key question is:
 
-Use this existing asset as the application's primary branding wherever appropriate.
+> **Why does Firebase/application have no resolved user immediately after the Google redirect, and why is the application treating that result as definitively signed out?**
 
-Do not create a completely different logo.
+Determine whether the problem is:
 
-Use the logo consistently in places such as:
+1. Firebase's redirect result handling
+2. Firebase Auth initialization
+3. Firebase persistence
+4. Multiple Firebase Auth instances
+5. Incorrect `authDomain`
+6. Incorrect Google OAuth configuration
+7. Redirect handling
+8. A race condition between `onAuthStateChanged()` and `getRedirectResult()`
+9. The application incorrectly suppressing the real auth-state callback
+10. Some code explicitly calling `signOut()`
+11. The application incorrectly interpreting an initial `null` user
+12. Something else
 
-* Login/authentication screens
-* Header
-* Sidebar/navigation
-* Student pages where appropriate
-* Admin pages where appropriate
-* CR pages where appropriate
-
-However, do not overuse the logo.
-
-Maintain good visual hierarchy and spacing around it.
-
----
-
-# STEP 3 — BROWSER TAB ICON / FAVICON
-
-The browser currently displays the default **Vite icon** in the browser tab.
-
-Remove the Vite favicon completely.
-
-Use the provided Attendiffy logo:
-
-`C:\Users\This Pc\Desktop\attendance_roaster\frontend\attendance-system\src\assets\attendiffy.jpg`
-
-as the application's favicon.
-
-Because this is a Vite application:
-
-1. Determine the correct way to make the logo available as a favicon.
-2. If necessary, copy an appropriate version of the asset into the `public` directory.
-3. Update `index.html`.
-4. Remove references to `/vite.svg`.
-5. Make sure the favicon works in both development and production.
-6. Check for any other default Vite branding in the frontend and remove it where appropriate.
-
-Do NOT leave the Vite icon anywhere in the application.
-
-If the JPG is not ideal for a favicon, create/use an appropriate favicon version derived from the same Attendiffy logo while keeping the original logo unchanged.
+Do not assume which one it is.
 
 ---
 
-# STEP 4 — AMITY-INSPIRED VISUAL THEME
+# VERY IMPORTANT: investigate the current implementation first
 
-I want the visual design to have an **Amity University-inspired academic/educational aesthetic**.
+Before changing anything, inspect the actual current code.
 
-Important:
+Search the entire project for:
 
-Do NOT make the website falsely appear to be an official Amity University website.
+```text
+initializeApp
+initializeAuth
+getAuth
+getRedirectResult
+signInWithRedirect
+signInWithPopup
+onAuthStateChanged
+browserLocalPersistence
+browserSessionPersistence
+setPersistence
+GoogleAuthProvider
+signOut
+returnedFromRedirect
+redirectUserRef
+auth state
+```
 
-Do not copy Amity's website directly.
+Especially inspect:
 
-Instead, take inspiration from the kind of visual language associated with a premium university environment:
+```text
+src/firebase.js
+src/context/AuthContext.jsx
+src/pages/StudentAttendance.jsx
+```
 
-* Academic
-* Professional
-* Institutional
-* Clean
-* Modern
-* Premium
-* Trustworthy
+but do NOT limit the investigation to those files.
 
-The website should feel appropriate for use by university students, CRs, faculty/admin, and academic staff.
-
----
-
-# COLOR DIRECTION
-
-Use a refined university-style color palette.
-
-Prefer a combination built around:
-
-* Deep navy / dark blue
-* Rich blue
-* White
-* Very light cool/neutral backgrounds
-* Subtle gold/yellow accents where appropriate
-
-The colors should feel premium and academic.
-
-Do not turn the entire application into a blue/gold gradient.
-
-Use colors with purpose:
-
-### Primary
-
-For important actions and navigation.
-
-### Secondary
-
-For supporting UI elements.
-
-### Accent
-
-For highlights and important academic/status information.
-
-### Success
-
-For attendance successfully marked.
-
-### Warning
-
-For session warnings or actions requiring attention.
-
-### Error
-
-For invalid forms/errors.
-
-Maintain good contrast and accessibility.
+Look for duplicate Firebase initialization and multiple Auth instances.
 
 ---
 
-# TYPOGRAPHY
+# Analyze the existing logs correctly
 
-Use a modern, professional typeface.
+The current logs indicate:
 
-The typography should feel appropriate for an academic SaaS application.
+```text
+returnedFromRedirect: true
+```
 
-Create a clear hierarchy between:
+So the application correctly knows that it has returned from a Google redirect.
 
-* Page titles
-* Section headings
-* Card titles
-* Body text
-* Labels
-* Helper text
-* Buttons
-* Status text
+Then:
 
-Avoid excessive font weights and huge headings.
+```text
+auth state deferred until redirect completes {hasUser: false}
+```
 
----
+This means the application's own logic is intentionally preventing the normal auth-state callback from immediately deciding the user is signed out.
 
-# OVERALL DESIGN STYLE
+Then:
 
-The finished application should feel like:
+```text
+redirect result checked ... resolvedUser: false
+```
 
-**A modern university attendance platform**
+This is the critical point.
 
-rather than:
+Then:
 
-**A generic Vite/React student project.**
+```text
+auth state: signed out
+```
 
-Use:
+The application is ultimately committing to the signed-out state.
 
-* Clean cards
-* Subtle borders
-* Controlled shadows
-* Professional spacing
-* Clear hierarchy
-* Consistent radius
-* Modern buttons
-* Professional tables
-* Status badges
-* Good empty states
-* Proper loading states
+I want you to determine whether:
 
-Avoid:
+```js
+getRedirectResult(auth)
+```
 
-* Excessive gradients
-* Excessive glassmorphism
-* Excessive rounded elements
-* Huge shadows
-* Too many colors
-* Unnecessary animations
-* Decorative elements that distract from attendance
-* Generic template-looking dashboards
+is actually returning `null`, and if so, **why**.
+
+At the same time, determine what:
+
+```js
+auth.currentUser
+```
+
+contains immediately before and after `getRedirectResult()`.
+
+Also determine exactly what `onAuthStateChanged()` emits during this period.
 
 ---
 
-# ADMIN DASHBOARD
+# Add better diagnostic logging if necessary
 
-Redesign the Admin Dashboard to look like a professional university administration system.
+If the current logs aren't enough, temporarily add detailed logging around the entire sequence.
 
-Improve:
+For example, log:
 
-* Navigation
-* Header
-* Dashboard cards
-* Attendance statistics
-* Student information
-* Session information
-* Tables
-* Filters
-* Search
-* Actions
-* Status indicators
+```text
+[AUTH DEBUG] Firebase auth instance created
+[AUTH DEBUG] auth.currentUser before redirect result
+[AUTH DEBUG] getRedirectResult started
+[AUTH DEBUG] getRedirectResult completed
+[AUTH DEBUG] redirect result user
+[AUTH DEBUG] auth.currentUser after redirect result
+[AUTH DEBUG] onAuthStateChanged fired
+[AUTH DEBUG] observer user
+[AUTH DEBUG] final auth decision
+[AUTH DEBUG] signOut called
+```
 
-Existing information should be presented with strong hierarchy.
+For a user object, log only safe identifying information such as:
 
-For example, if the current application has:
+```text
+uid
+email
+providerId
+```
 
-* Total students
-* Present students
-* Absent students
-* Attendance percentage
-* Active sessions
-* Recent sessions
+Never log:
 
-make those visually easy to scan.
+* access tokens
+* refresh tokens
+* passwords
+* credentials
 
-Do not invent backend functionality.
-
-Use only information that already exists.
-
-### Tables
-
-Make tables professional and readable.
-
-Use:
-
-* Proper spacing
-* Clear headers
-* Status badges
-* Row hover states
-* Good alignment
-* Responsive handling
+Also log Firebase error codes/messages if any operation throws.
 
 ---
 
-# CR SCREEN
+# Investigate the redirect lifecycle
 
-The CR screen should be extremely clear because it is used during live attendance.
+I want you to determine whether this is actually a successful Firebase redirect authentication or whether Google/Firebase is returning to the application without completing the Firebase credential exchange.
 
-The CR should immediately understand:
+Trace:
 
-* Current class/session
-* Attendance status
-* Whether the QR is active
-* Number of students present
-* Session state
-* Available actions
+```text
+signInWithRedirect()
+        ↓
+Google
+        ↓
+Firebase /__/auth/handler
+        ↓
+application reload
+        ↓
+Firebase Auth initialization
+        ↓
+getRedirectResult()
+        ↓
+onAuthStateChanged()
+```
 
-The primary action should be visually dominant.
+Determine which step fails.
 
-If the current system has actions such as:
-
-* Start attendance
-* Stop attendance
-* Generate/display QR
-* Refresh QR
-* View attendance
-* Monitor attendance
-
-organize them clearly without changing their functionality.
-
-The CR should understand the current attendance state within a few seconds.
+Do not simply assume that because the Google account-selection page appeared, Firebase successfully established the authenticated Firebase session.
 
 ---
 
-# STUDENT LANDING SCREEN
+# Investigate Firebase persistence
 
-This is the screen students reach after scanning the attendance QR.
+Check exactly how Firebase Auth persistence is configured.
 
-Keep this interface extremely clean.
+Determine:
 
-The student should immediately understand:
+* Which Firebase Auth instance is being used.
+* Which persistence mechanism is active.
+* Whether `browserLocalPersistence` is actually applied.
+* Whether it is applied to the same Auth instance used by `signInWithRedirect()`.
+* Whether `initializeAuth()` and `getAuth()` are accidentally creating/using different instances.
+* Whether persistence initialization occurs before authentication.
+* Whether anything clears IndexedDB/local storage.
+* Whether anything calls `signOut()` during initialization.
 
-1. An attendance session has been detected.
-2. Which class/session it belongs to.
-3. What they need to do next.
+Do not blindly change persistence.
 
-Make the primary action very obvious.
-
-Avoid unnecessary navigation and information.
-
-The page should feel:
-
-* Secure
-* Trustworthy
-* Simple
-* Fast
-* Professional
-
-This screen will likely be used primarily on mobile phones, so prioritize mobile UX.
+First establish what is currently happening.
 
 ---
 
-# STUDENT DETAILS / ATTENDANCE SCREEN
+# Investigate the possibility of a race condition
 
-This is where the student enters/selects their details and completes attendance.
+The current logs strongly suggest that there may be a timing/state-machine issue.
 
-Make the form extremely polished.
+Investigate whether the application is doing something conceptually like:
 
-Improve:
+```text
+Firebase starts
+        ↓
+onAuthStateChanged(null)
+        ↓
+application suppresses it because redirect is pending
+        ↓
+getRedirectResult() returns null
+        ↓
+application assumes signed out
+        ↓
+real Firebase auth state arrives later
+        ↓
+but application has already committed to signed out
+```
 
-* Input fields
-* Labels
-* Dropdowns
-* Validation
-* Error messages
-* Submit button
-* Loading state
-* Success state
+If this is occurring, prove it with logs.
 
-Every field should clearly communicate what information is required.
+Also determine whether the duplicate:
 
-Validation messages should appear close to the relevant field.
+```text
+[AUTH] initialization started
+```
 
-The main submission action should be obvious.
+and duplicate:
 
-After successful attendance, provide clear visual confirmation.
+```text
+[AUTH] redirect result checked
+```
 
----
+indicate that the AuthContext/provider is being initialized more than once.
 
-# MOBILE RESPONSIVENESS
+Investigate why those logs appear twice.
 
-This is extremely important.
-
-Students will primarily access the QR attendance flow using their phones.
-
-Do not simply shrink the desktop interface.
-
-Design the mobile experience intentionally.
-
-Test/consider widths such as:
-
-* 320px
-* 375px
-* 390px
-* 430px
-
-Ensure:
-
-* No horizontal overflow
-* Buttons are easy to tap
-* Inputs are comfortable
-* Text remains readable
-* Cards don't become cramped
-* QR-related UI is easy to understand
-* Forms are easy to complete
-* Navigation works properly
-
-Desktop should remain polished as well.
+Do NOT simply deduplicate the logs. Determine whether there are actually two instances/effects/providers executing.
 
 ---
 
-# LOADING / ERROR / SUCCESS STATES
+# Check whether getRedirectResult() is being used incorrectly
 
-Improve all existing states.
+Do not assume:
 
-### Loading
+```js
+getRedirectResult(auth) === null
+```
 
-Use appropriate spinners/skeletons rather than blank screens.
+means:
 
-### Errors
+```text
+Firebase user is signed out.
+```
 
-Use professional, human-readable error messages.
+Those are not necessarily equivalent.
 
-Do not expose raw technical errors unless necessary.
+The authoritative application state should be based on the actual Firebase Auth state.
 
-### Success
+Determine the correct architecture for handling:
 
-Clearly communicate successful attendance/session actions.
+```text
+initial auth loading
+authenticated
+unauthenticated
+redirect processing
+redirect error
+```
 
-### Empty states
-
-If there are no records/sessions/students, provide a useful empty state rather than an empty blank area.
-
----
-
-# MICRO-INTERACTIONS
-
-Add subtle animations where they improve usability.
-
-Examples:
-
-* Button hover
-* Button press
-* Card hover
-* Form feedback
-* Modal transitions
-* Success feedback
-* Loading transitions
-
-Keep animations subtle.
-
-The application should feel fast.
+The application should not prematurely render "signed out" while Firebase is still restoring authentication.
 
 ---
 
-# CONSISTENCY
+# Check Firebase and Google configuration
 
-Create one coherent design system.
+Only if the code investigation points toward configuration, verify:
 
-If possible, create/reuse components for:
+### Firebase
 
-* Buttons
-* Cards
-* Inputs
-* Selects
-* Badges
-* Alerts
-* Modals
-* Tables
-* Headers
-* Navigation
-* Loading states
-* Empty states
+* `projectId`
+* `authDomain`
+* `appId`
+* Google provider enabled
+* Authorized domains
 
-Do not create four completely different designs for the four interfaces.
+### Google OAuth
 
-They should clearly feel like the same application.
+* OAuth client
+* Firebase redirect handler
+* authorized redirect URI
+* correct Firebase project
 
----
+The deployed application is:
 
-# ACCESSIBILITY
+```text
+attendance-roaster-7ce62.web.app
+```
 
-Improve accessibility while redesigning.
+and the Firebase auth domain is expected to correspond to:
 
-Ensure:
+```text
+attendance-roaster-7ce62.firebaseapp.com
+```
 
-* Good color contrast
-* Visible focus states
-* Proper labels
-* Keyboard accessibility
-* Buttons are actual buttons
-* Inputs have labels
-* Icons don't unnecessarily replace text
-* Status is not communicated through color alone
+Do not tell me to modify Firebase Console settings unless the investigation provides evidence that configuration is responsible.
 
 ---
 
-# PERFORMANCE
+# Check for accidental sign-out
 
-Do not make the UI redesign unnecessarily heavy.
+Search the entire application for:
 
-Avoid adding large libraries or assets unless genuinely necessary.
+```js
+signOut(
+```
 
-Prefer the existing technology stack.
+Determine whether `signOut()` is being called anywhere during:
 
-Keep:
+* initial page load
+* auth initialization
+* redirect handling
+* route changes
+* component cleanup
+* attendance initialization
+* error handling
 
-* Initial loading fast
-* Components lightweight
-* Animations efficient
-* Images optimized
-
----
-
-# FINAL QUALITY CHECK
-
-After implementation, review the application as a professional UI/UX designer.
-
-Check all four experiences:
-
-### ADMIN
-
-Does it look like a professional university administration dashboard?
-
-### CR
-
-Can the CR immediately understand and control an attendance session?
-
-### STUDENT LANDING
-
-Can a student immediately understand what to do after scanning the QR?
-
-### STUDENT FORM
-
-Can a student comfortably complete attendance from a mobile phone?
-
-### BRANDING
-
-Does the Attendiffy logo appear naturally throughout the application?
-
-### FAVICON
-
-Does the browser tab show the Attendiffy icon instead of the Vite icon?
-
-### CONSISTENCY
-
-Do all pages look like they belong to the same product?
-
-### RESPONSIVENESS
-
-Does everything work properly on mobile and desktop?
-
-### FUNCTIONALITY
-
-Does all existing functionality still work exactly as before?
-
-Fix any inconsistencies you find before considering the task complete.
+If it is being called, identify exactly why.
 
 ---
 
-## FINAL PRINCIPLE
+# Check routing
 
-The redesign should communicate:
+The redirect appears to return to:
 
-**Attendiffy**
+```text
+/
+```
 
-### Simple. Fast. Professional Attendance.
+according to:
 
-The primary objective is not to make the application flashy.
+```text
+pathname: '/'
+```
 
-The objective is to make it feel like a **real, polished university attendance platform that students and administrators can confidently use every day.**
+Investigate whether this is expected.
+
+Check whether:
+
+* the attendance route is lost
+* query parameters are lost
+* the attendance token is lost
+* the application redirects to `/`
+* `/` initializes a separate auth flow
+* the root page mounts another AuthContext
+* the root page causes the authentication state to reset
+
+Do not change routing unless necessary.
+
+---
+
+# Do not stack more workarounds
+
+Previous attempts have already tried:
+
+* `redirectUserRef`
+* deferred auth state
+* `browserPopupRedirectResolver`
+* `browserLocalPersistence`
+* additional AuthContext logic
+* allowing `StudentAttendance.advance()` to recover
+
+These did not solve the underlying issue.
+
+Therefore:
+
+**Do not add another timeout, retry loop, arbitrary delay, polling mechanism, or additional state flag just to make the UI appear signed in.**
+
+I want the root cause fixed.
+
+If previous changes are now unnecessary or are actually contributing to the bug, clean them up.
+
+---
+
+# Required architecture after the fix
+
+The authentication flow should have a clear state model:
+
+```text
+INITIALIZING
+      ↓
+FIREBASE RESTORING SESSION
+      ↓
+ ┌────┴────┐
+ ↓         ↓
+USER      NULL
+ ↓         ↓
+SIGNED IN  SIGNED OUT
+```
+
+While Firebase is still determining the persisted session:
+
+```text
+Do NOT show "signed out".
+```
+
+Only after Firebase has definitively completed initialization should the application transition to:
+
+```text
+SIGNED IN
+```
+
+or:
+
+```text
+SIGNED OUT
+```
+
+For Google redirect handling, make sure the redirect result and Firebase Auth observer are coordinated correctly without one incorrectly overwriting the other.
+
+---
+
+# Important testing requirements
+
+After making the fix:
+
+```text
+npm run lint
+npm run build
+```
+
+Then perform a real browser test if the environment allows it.
+
+Test exactly:
+
+```text
+1. Open a fresh Incognito window.
+2. Open the deployed application.
+3. Start the attendance flow.
+4. Click "Sign in with Google".
+5. Select a Google account.
+6. Complete authentication.
+7. Return to the application.
+8. Check the browser console.
+9. Confirm the application shows the authenticated user.
+10. Refresh the page.
+11. Confirm the user remains authenticated.
+12. Start another attendance action if applicable.
+13. Log out.
+14. Confirm the application becomes signed out.
+15. Sign in again.
+16. Confirm authentication works again.
+```
+
+Also test the same flow locally if appropriate.
+
+---
+
+# What I expect in your final response
+
+Do not simply say:
+
+> "Fixed."
+
+Give me:
+
+### 1. Root cause
+
+Exactly what caused the authenticated Firebase user to disappear/not be recognized after the Google redirect.
+
+### 2. Evidence
+
+Explain what the existing logs showed and what additional evidence you found.
+
+In particular, explain these lines:
+
+```text
+auth state deferred until redirect completes {hasUser: false}
+
+redirect result checked {
+  pathname: '/',
+  returnedFromRedirect: true,
+  resolvedUser: false
+}
+
+auth state: signed out
+```
+
+### 3. Why the previous fixes didn't work
+
+Explain why the earlier changes to `AuthContext`, persistence, and redirect handling did not resolve the underlying problem.
+
+### 4. Files changed
+
+List every modified file and explain the change.
+
+### 5. Authentication flow after the fix
+
+Show the corrected flow:
+
+```text
+Google
+ ↓
+Firebase redirect
+ ↓
+Firebase Auth restoration
+ ↓
+Auth observer / redirect result
+ ↓
+AuthContext
+ ↓
+authenticated application
+```
+
+### 6. Verification
+
+Report:
+
+```text
+npm run lint
+npm run build
+```
+
+and whether an actual Google OAuth round trip was successfully tested.
+
+### 7. If it still cannot be fixed
+
+If you reach a point where the code is demonstrably correct but Firebase/Google configuration is the blocker, **do not make up a solution**.
+
+Tell me exactly:
+
+```text
+What was verified
+What failed
+What evidence proves it
+What exact Firebase/Google Console setting needs checking
+```
+
+The priority is:
+
+> **Find the actual point where the authenticated Google/Firebase session is lost after the redirect, fix that root cause, and prove the fix rather than adding another workaround.**

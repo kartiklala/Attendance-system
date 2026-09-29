@@ -426,11 +426,20 @@ form input:focus-visible,
   text-align: left;
 }
 
-.header-actions {
+/* Header action cluster (Admins get a "Admin Dashboard" button beside Sign out). */
+.cr-header-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
+}
+
+/* Admin dashboard cross-navigation to the inherited CR area. */
+.admin-role-nav {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  margin-bottom: 8px;
 }
 
 .qr-block {
@@ -475,8 +484,44 @@ form input:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 
-/* Permanent QR: replace the countdown with a status line + manual refresh. */
+/* Permanent QR: message + manual refresh icon (invalidates the old code). */
 .qr-permanent-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.qr-countdown-permanent {
+  color: var(--success, #21a366);
+  font-weight: 600;
+}
+
+.qr-refresh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.qr-refresh-icon {
+  display: inline-block;
+  font-size: 1.15em;
+  line-height: 1;
+}
+
+.qr-refresh-icon.spinning {
+  animation: qr-refresh-spin 0.8s linear infinite;
+}
+
+@keyframes qr-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.starting-block,
+.ended-block {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -667,11 +712,12 @@ form input:focus-visible,
 .present-popup {
   position: absolute;
   right: 18px;
-  bottom: -60px;
+  bottom: -60px; /* start just below the visible viewport */
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 15px;
+  max-width: min(78vw, 320px);
+  padding: 6px 14px;
   border-radius: 999px;
   background: var(--success-bg);
   color: var(--success);
@@ -679,26 +725,41 @@ form input:focus-visible,
   font-weight: 600;
   font-size: 0.85rem;
   white-space: nowrap;
-  box-shadow: 0 4px 14px rgba(26, 127, 75, 0.22);
+  box-shadow: 0 2px 8px rgba(22, 101, 52, 0.18);
+  /* Climb the full viewport height while drifting to the right, so each
+     arrival travels from the bottom of the screen toward the top-right
+     corner. Staggered animation-delay keeps close arrivals from completely
+     overlapping each other. */
   animation: popup-rise 4.2s ease-out forwards;
 }
 
-/* Gmail profile picture shown next to a student's name when they arrive. */
-.popup-avatar {
+/* Google profile avatar (or the Google icon fallback) beside the name. */
+.present-popup-avatar {
   width: 24px;
   height: 24px;
   border-radius: 50%;
   object-fit: cover;
-  background: var(--surface-2);
-  border: 1px solid #bfe6cd;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  background: #ffffff;
+  border: 1px solid #86efac;
+  align-items: center;
+  justify-content: center;
+}
+
+.present-popup-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.present-popup-check {
+  font-weight: 800;
 }
 
 @keyframes popup-rise {
-  0% { opacity: 0; transform: translateY(0); }
+  0% { opacity: 0; transform: translate(-12vw, 0); }
   8% { opacity: 1; }
   85% { opacity: 1; }
-  100% { opacity: 0; transform: translateY(calc(-100vh - 80px)); }
+  100% { opacity: 0; transform: translate(0, calc(-100vh - 80px)); }
 }
 
 /* ---- Proxy warnings ------------------------------------------------------ */
@@ -1141,9 +1202,47 @@ form input:focus-visible,
   border-bottom: 1px solid var(--border);
 }
 
-.admin-cr-list li:last-child {
-  border-bottom: none;
+.admin-cr-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
+
+.admin-cr-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Red "X" that removes a CR from the authoritative list. */
+.admin-cr-remove {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #b91c1c;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+
+.admin-cr-remove:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+.admin-cr-remove:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- Responsive ----------------------------------------------------------- */
+@media (max-width: 480px) {
+  .popup-layer {
+    right: 0;
+  }
 
 .admin-cr-list li::before {
   content: "";

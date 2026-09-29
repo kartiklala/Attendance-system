@@ -42,6 +42,10 @@ class Settings:
     # CR-adjustable QR lifetimes (seconds). Backend validates every request
     # against this list — the frontend can never pick an unsafe value.
     QR_ALLOWED_LIFETIME_SECONDS: tuple[int, ...] = (5, 10, 15, 20, 30, 60)
+    # Sentinel lifetime meaning "never expires". A Permanent QR is only rotated
+    # when the CR presses the manual refresh button (POST /qr/rotate), which
+    # immediately invalidates the previous token.
+    QR_PERMANENT_LIFETIME_SECONDS: int = 0
 
     # CORS / URLs
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
@@ -55,9 +59,10 @@ class Settings:
     GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "")
     GOOGLE_SHEET_NAME: str = os.getenv("GOOGLE_SHEET_NAME", "Attendance")
     GOOGLE_STUDENTS_SHEET_NAME: str = os.getenv("GOOGLE_STUDENTS_SHEET_NAME", "Sheet1")
-    # Bound each Sheets HTTP call so a slow read fails fast (and the roster
-    # cache can serve stale) instead of hanging the request until the OS drops it.
-    SHEETS_TIMEOUT_SECONDS: float = _float("SHEETS_TIMEOUT_SECONDS", 8)
+    # Bounded HTTP timeout (seconds) for Google Sheets calls, so a slow Sheets
+    # read fails fast and the roster cache (stale-on-error) can cover it,
+    # instead of hanging on the OS default and surfacing as a 500.
+    SHEETS_TIMEOUT_SECONDS: float = _float("SHEETS_TIMEOUT_SECONDS", 20)
 
     @property
     def is_production(self) -> bool:

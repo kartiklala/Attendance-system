@@ -1,20 +1,22 @@
 """Attendance routes: shared CR session control, QR rotation, student flow."""
 import logging
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Request
 
 from app.core.config import settings
 from app.middleware.auth import CurrentUser, get_current_user, require_cr, require_student
 from app.models.attendance import (
     AttendanceCheckRequest,
     AttendanceCheckResponse,
+    BindAttemptRequest,
+    BindAttemptResponse,
     Last3Request,
+    StartAttemptRequest,
+    StartAttemptResponse,
     StatsResponse,
     StudentConfirmResponse,
     StudentFoundResponse,
     StudentMeResponse,
-    VerifyTokenRequest,
-    VerifyTokenResponse,
 )
 from app.models.session import (
     ActiveSessionResponse,
@@ -44,9 +46,12 @@ router = APIRouter(tags=["attendance"])
 
 def _session_info(session: dict) -> SessionInfo:
     raw_lifetime = session.get("qr_lifetime_seconds")
-    # None-safe: 0 is a valid "Permanent" lifetime, never coerce it away.
-    lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS if raw_lifetime is None
-                else int(raw_lifetime))
+    # 0 is a valid Permanent lifetime; only fall back when the key is absent.
+    try:
+        lifetime = (settings.QR_TOKEN_LIFETIME_SECONDS
+                    if raw_lifetime is None else int(raw_lifetime))
+    except (TypeError, ValueError):
+        lifetime = settings.QR_TOKEN_LIFETIME_SECONDS
     return SessionInfo(
         session_id=session["session_id"],
         session_name=session.get("session_name", ""),
@@ -131,9 +136,9 @@ def rotate_qr(
     payload: QRRefreshRequest,
     cr: CurrentUser = Depends(require_cr),
 ) -> QRRefreshResponse:
-    """CR-only: force a brand-new QR right now and invalidate the previous
-    token. Powers the manual "Refresh QR" control (notably in Permanent mode,
-    where the QR would otherwise never change on its own)."""
+    """CR-only manual refresh: immediately mint a NEW QR and invalidate the
+    previous one, regardless of its expiry. This is the control the Permanent
+    lifetime relies on (a Permanent QR otherwise never changes on its own)."""
     qr = qr_service.rotate_qr_now(payload.session_id)
     return QRRefreshResponse(success=True, qr=qr)
 
@@ -193,20 +198,57 @@ def get_session(
     return SessionResponse(success=True, session=_session_info(session))
 
 
-# ---- Student: token, enrollment lookup, attendance --------------------------
+# ---- Student: attendance attempt, enrollment lookup, attendance ------------
 
-@router.post("/attendance/verify-token", response_model=VerifyTokenResponse)
-def verify_token(
-    payload: VerifyTokenRequest,
-    user: CurrentUser = Depends(get_current_user),
-) -> VerifyTokenResponse:
-    """Student scanned a QR: validate it and start the server-side
-    one-minute completion window."""
-    record = qr_service.scan_token(payload.session_token)
-    return VerifyTokenResponse(
+@router.post("/attendance/attempt/start", response_model=StartAttemptResponse)
+def start_attempt(payload: StartAttemptRequest) -> StartAttemptResponse:
+    """Public entry gateway: a student reached /attendance from a live QR.
+
+    Deliberately NOT JWT-protected — Google sign-in has not happened yet, and
+    the whole point is to start the student's individual completion window the
+    instant the QR link is opened. The QR token is the only accepted input and
+    is validated entirely server-side (exists, session active, still the
+    displayed/unexpired token). The response carries the opaque attempt id and
+    the server-side window only: no roster, no student/CR/ Firebase identity,
+    no session coordinates, and nothing here marks attendance.
+    """
+    record = qr_service.scan_token(payload.token)
+    attempt = qr_service.create_attempt(record)
+    return StartAttemptResponse(
         success=True,
-        session_id=record["session_id"],
-        window_seconds=settings.STUDENT_SESSION_MINUTES * 60,
+        attempt_id=attempt["attempt_id"],
+        window_seconds=int(attempt["window_seconds"]),
+        expires_at=str(attempt["expires_at"]),
+        remaining_seconds=qr_service.attempt_remaining_seconds(attempt),
+    )
+
+
+@router.post("/attendance/attempt/bind", response_model=BindAttemptResponse)
+def bind_attempt(
+    payload: BindAttemptRequest,
+    student: CurrentUser = Depends(require_student),
+) -> BindAttemptResponse:
+    """Attach the authenticated Firebase UID to the student's attempt.
+
+    The binding is server-side only: the client proves authentication, it can
+    never claim an identity. An attempt already bound to a different account is
+    rejected (ATTENDANCE_ATTEMPT_BOUND). The saved enrollment is returned with
+    it so the returning-student screen needs a single round trip.
+    """
+    attempt = qr_service.bind_attempt(payload.attempt_id, student.uid)
+    saved = student_service.get_saved_enrollment(student.uid)
+    if saved is None:
+        return BindAttemptResponse(
+            success=True,
+            verified=False,
+            remaining_seconds=qr_service.attempt_remaining_seconds(attempt),
+        )
+    return BindAttemptResponse(
+        success=True,
+        verified=True,
+        name=saved["name"],
+        masked_enrollment=student_service.mask_enrollment(saved["enrollment_no"]),
+        remaining_seconds=qr_service.attempt_remaining_seconds(attempt),
     )
 
 
@@ -265,14 +307,17 @@ def student_confirm(
 def attendance_check(
     payload: AttendanceCheckRequest,
     request: Request,
+    background: BackgroundTasks,
     student: CurrentUser = Depends(require_student),
 ) -> AttendanceCheckResponse:
     """Student attendance submission. Identity comes from the backend-verified
-    enrollment saved against the Firebase UID; every other check is enforced
-    server-side (see attendance_service.mark_attendance). IP and user-agent
-    are captured from the actual HTTP request for the audit trail."""
+    enrollment saved against the Firebase UID; the completion window is the
+    student's own bound attendance attempt (never the QR token). Every other
+    check is enforced server-side (see attendance_service.mark_attendance).
+    IP and user-agent are captured from the actual HTTP request for the audit
+    trail. The cosmetic per-session Sheet tab flip runs after the response."""
     result = attendance_service.mark_attendance(
-        student.uid, payload, client=_client_info(request), email=student.email
+        student.uid, payload, client=_client_info(request), background=background
     )
     return AttendanceCheckResponse(
         success=True,

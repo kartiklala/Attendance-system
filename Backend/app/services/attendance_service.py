@@ -3,28 +3,33 @@
 Order of checks performed for every /attendance/check call:
 1. JWT (FastAPI dependency, before this service runs)
 2. Backend-verified enrollment linked to the Firebase UID (users/{uid})
-3. QR token exists / valid / not expired (server timestamps)
-4. Session exists and is active
-5. One-minute completion window (server-authoritative)
-6. Enrollment still matches the authoritative Google Sheet roster
-7. Distance between CR location and student location <= radius (Haversine)
-8. Duplicate prevention (per student per session, server-side)
+3. Individual attendance attempt: exists, bound to THIS uid, not used,
+   not expired (server timestamps) and its session still active
+4. Enrollment still matches the authoritative Google Sheet roster
+5. Distance between CR location and student location <= radius (Haversine)
+6. Duplicate prevention (per student per session, server-side)
 Then: write Firestore attendance document (with server-side audit fields:
 client IP, user-agent, derived device hash) + Google Sheet PRESENT row +
-per-session worksheet status flip, and flag suspicious same-IP/device use.
+per-session worksheet status flip, close the attempt, and flag suspicious
+same-IP/device use.
+
+The QR token's own short lifetime is deliberately NOT re-checked here: the QR
+governs ENTRY into the flow, the attempt governs COMPLETION.
 
 Also provides the session statistics (water fill / popups / proxy warnings)
 and the final absentee summary — both computed strictly from server-side data.
 """
 import hashlib
 import logging
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.firebase import COLLECTION_ATTENDANCE, COLLECTION_SESSIONS, get_db
-from app.services import qr_service, sheets_service, student_service
+from app.services import qr_service, session_service, sheets_service, student_service
 from app.services.errors import BadRequestError, ConflictError
 from app.utils.location import haversine_distance_meters
 
@@ -45,50 +50,121 @@ def derive_device_hash(client_ip: str, user_agent: str) -> str:
     return hashlib.sha256(seed).hexdigest()[:16]
 
 
-def _profile_photo_url(email: str) -> str:
-    """Google account profile-picture URL for an email ("" when unknown).
+def _gather(*calls):
+    """Run independent blocking reads concurrently.
 
-    This is the public, deterministic avatar endpoint Google provides for
-    Workspace/Gmail addresses; the CR dashboard shows it in the arrival
-    popup exactly like it used to. No extra storage — derived from the
-    email recorded at check-in (server-observed, never from the body)."""
-    email = str(email or "").strip().lower()
-    if not email:
-        return ""
-    return (
-        "https://www.google.com/search/photo?"
-        f"auto=webp&sz=96&email={quote(email, safe='')}"
+    Firestore document reads and the (process-cached) roster lookup are
+    independent network round trips; issuing them in parallel removes the
+    serial latency a student would otherwise wait through on every submit.
+    Exceptions propagate from .result() so validation order is unchanged.
+    """
+    if len(calls) == 1:
+        return [calls[0]()]
+    with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+        futures = [pool.submit(fn) for fn in calls]
+        return [f.result() for f in futures]
+
+
+def _present_flip_best_effort(sheet_title: str, enrollment_no: str) -> None:
+    """Cosmetic per-session tab update: never blocks or fails the student."""
+    try:
+        sheets_service.mark_student_present(sheet_title, enrollment_no)
+    except Exception:
+        logger.exception("Could not update the session sheet tab %s", sheet_title)
+
+
+def _same_device_enrollments(session_id: str, device_hash: str) -> list[str]:
+    """Enrollments already recorded this session on the SAME device_hash.
+
+    device_hash is sha256(client_ip + user_agent), so a match means the same
+    browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
+    filters need no composite index. Includes the just-written record."""
+    if not device_hash:
+        return []
+    docs = (
+        get_db()
+        .collection(COLLECTION_ATTENDANCE)
+        .where("session_id", "==", session_id)
+        .where("device_hash", "==", device_hash)
+        .stream()
     )
+    enrollments = []
+    for doc in docs:
+        enrollment = (doc.to_dict() or {}).get("enrollment_no", "")
+        if enrollment:
+            enrollments.append(enrollment)
+    return enrollments
+
+
+def _proxy_flag_best_effort(sheet_title: str, enrollments: list[str]) -> None:
+    """Cosmetic proxy remark on the session tab: never blocks or fails the
+    student. Best-effort like the PRESENT flip."""
+    try:
+        sheets_service.flag_proxy_remarks(sheet_title, enrollments)
+    except Exception:
+        logger.exception("Could not write proxy remarks on the session sheet tab %s",
+                         sheet_title)
+
+
+def _proxy_check_and_flag_best_effort(sheet_title: str, session_id: str,
+                                      device_hash: str) -> None:
+    """After a successful mark, flag EVERY student sharing this device_hash
+    (same browser + same IP) once two or more have used it. Runs as a background
+    task so the extra read never delays the student's response."""
+    if not sheet_title or not device_hash:
+        return
+    group = _same_device_enrollments(session_id, device_hash)
+    if len(group) > 1:
+        _proxy_flag_best_effort(sheet_title, group)
 
 
 def mark_attendance(student_uid: str, payload, client: dict | None = None,
-                    email: str = "") -> dict:
+                   background=None) -> dict:
     """Validate everything and mark the student PRESENT.
 
-    `payload` is an AttendanceCheckRequest (session_token + coordinates).
+    `payload` is an AttendanceCheckRequest (attempt_id + coordinates).
     `client` carries the SERVER-observed request info {ip, user_agent} —
     the request body can never supply or override these fields. The
     student's identity is taken from the backend-verified enrollment saved
     against their Firebase UID — never from the request body.
+    `background` (optional FastAPI BackgroundTasks) receives the cosmetic
+    Sheet tab flip so the response is not delayed by it.
     """
-    logger.info("Attendance validation attempted session_token=present")
+    started = time.monotonic()
+    logger.info("Attendance validation started")
 
-    # Check 2 — the student must have a backend-verified enrollment saved.
-    saved = student_service.get_saved_enrollment(student_uid)
+    # Checks 2 + 3 (entry reads) in parallel: the verified enrollment and the
+    # student's own attendance attempt are independent documents.
+    saved, attempt = _gather(
+        lambda: student_service.get_saved_enrollment(student_uid),
+        lambda: qr_service.get_attempt(payload.attempt_id),
+    )
     if saved is None:
         raise BadRequestError(
             "Please verify your enrollment details first.",
             code="ENROLLMENT_NOT_VERIFIED",
         )
 
-    # Checks 3 + 4 + 5 — QR token, session status, one-minute window.
-    token_record, session = qr_service.validate_token_for_check(payload.session_token)
+    # The attempt (NOT the QR token) authorizes this submission: bound to this
+    # UID, still active, not expired, and its session still live.
+    session = session_service.get_session(attempt["session_id"])
+    qr_service.validate_attempt_for_check(attempt, session, student_uid)
     session_id = session["session_id"]
+    db = get_db()
+    # Deterministic id from the SAVED enrollment: normalize_enrollment is
+    # idempotent, so this equals the id derived from the roster value below.
+    doc_id = _attendance_doc_id(session_id, saved["enrollment_no"])
+    ref = db.collection(COLLECTION_ATTENDANCE).document(doc_id)
 
-    # Check 6 — enrollment must still exist in the authoritative roster.
-    roster_enrollment, roster_name = _match_roster_enrollment(saved["enrollment_no"])
+    # Checks 4 + 6 (roster match, duplicate records) in parallel.
+    roster_pair, doc_exists, uid_exists = _gather(
+        lambda: _match_roster_enrollment(saved["enrollment_no"]),
+        lambda: ref.get().exists,
+        lambda: _uid_already_marked(session_id, student_uid),
+    )
+    roster_enrollment, roster_name = roster_pair
 
-    # Check 7 — location, calculated only from server-side session data.
+    # Check 5 — location, calculated only from server-side session data.
     distance = haversine_distance_meters(
         float(session["latitude"]), float(session["longitude"]),
         payload.latitude, payload.longitude,
@@ -100,11 +176,7 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         raise BadRequestError("You are outside the attendance location.",
                               code="OUTSIDE_LOCATION")
 
-    # Check 8 — duplicate prevention (deterministic id + UID scan).
-    db = get_db()
-    doc_id = _attendance_doc_id(session_id, roster_enrollment)
-    ref = db.collection(COLLECTION_ATTENDANCE).document(doc_id)
-    if ref.get().exists or _uid_already_marked(session_id, student_uid):
+    if doc_exists or uid_exists:
         logger.info("Attendance rejected (duplicate) session_id=%s", session_id)
         raise ConflictError("Attendance already marked for this session.",
                             code="ALREADY_MARKED")
@@ -124,6 +196,7 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         "session_id": session_id,
         "session_name": session.get("session_name", ""),
         "student_uid": student_uid,
+        "attempt_id": attempt.get("attempt_id", ""),
         "name": roster_name,
         "enrollment_no": roster_enrollment,
         "email": (email or "").strip().lower(),
@@ -135,7 +208,12 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         "client_ip": client_ip,
         "user_agent": user_agent,
         "device_hash": device_hash,
+        # Google avatar (public profile image) for the CR present-popup.
+        "photo_url": str(saved.get("photo_url") or ""),
     })
+
+    # The attempt is spent: it can never be replayed for a second record.
+    qr_service.close_attempt(attempt["_doc_id"], "used")
 
     # Google Sheet row. If the sheet write fails, roll back the Firestore
     # record so the student can retry cleanly.
@@ -146,31 +224,32 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         ref.delete()
         raise
 
-    # Per-session worksheet: flip this student to PRESENT (best-effort —
-    # Firestore already recorded the attendance, so failures never reject it).
+    # Per-session worksheet: flip this student to PRESENT. This is a cosmetic
+    # convenience view (Firestore is the source of truth and the absentee
+    # summary is computed from it), so it is deferred to a background task
+    # when available — the student's response is never blocked by a Sheet
+    # round trip. Failures are logged only, exactly as before.
     sheet_title = session.get("sheet_title")
     if sheet_title:
-        try:
-            sheets_service.mark_student_present(sheet_title, roster_enrollment)
-        except Exception:
-            logger.exception("Could not update the session sheet tab %s",
-                             sheet_title)
-        # Maintain the session tab's Remarks column (cosmetic, best-effort):
-        # when two or more DISTINCT students share this device_hash (same
-        # browser + same IP — never merely a shared Wi-Fi router), flag every
-        # enrollment in that group. Runs after the record is committed, so the
-        # query includes the attendance just written.
-        if device_hash:
-            try:
-                group = _same_device_enrollments(session_id, device_hash)
-                if len(group) > 1:
-                    sheets_service.flag_proxy_remarks(sheet_title, group)
-            except Exception:
-                logger.exception("Could not write proxy remarks on the session sheet tab %s",
-                                 sheet_title)
+        if background is not None:
+            background.add_task(_present_flip_best_effort, sheet_title,
+                                roster_enrollment)
+        else:
+            _present_flip_best_effort(sheet_title, roster_enrollment)
 
-    logger.info("Attendance successful session_id=%s distance=%.1fm",
-                session_id, distance)
+    # Proxy remarks: flag every student sharing this device_hash (same browser
+    # + same IP) once two or more have marked. A shared IP alone (one Wi-Fi
+    # router, different browsers) never triggers it — device_hash includes the
+    # user-agent too.
+    if sheet_title and device_hash:
+        if background is not None:
+            background.add_task(_proxy_check_and_flag_best_effort, sheet_title,
+                                session_id, device_hash)
+        else:
+            _proxy_check_and_flag_best_effort(sheet_title, session_id, device_hash)
+
+    logger.info("Attendance successful session_id=%s distance=%.1fm pipeline_ms=%s",
+                session_id, distance, int((time.monotonic() - started) * 1000))
     return {
         "status": "PRESENT",
         "marked_at": marked_at_iso,
@@ -270,10 +349,8 @@ def get_session_stats(session_id: str) -> dict:
         {
             "name": d.get("name", ""),
             "marked_at": str(d.get("marked_at", "")),
-            # Gmail/Google profile picture for the arrival popup. Derived
-            # server-side from the verified account email; older records
-            # (no email stored) simply get "" and show the plain popup.
-            "photo": _profile_photo_url(d.get("email", "")),
+            # Avatar only — enrollment, IP, device and coordinates stay here.
+            "photo_url": str(d.get("photo_url") or ""),
         }
         for d in entries[:10]
     ]

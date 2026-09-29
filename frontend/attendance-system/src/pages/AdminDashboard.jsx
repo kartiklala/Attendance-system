@@ -19,8 +19,8 @@ export default function AdminDashboard() {
   const [notice, setNotice] = useState(null);
   // Disable "Add CR" on the first click while the request is in flight.
   const [adding, setAdding] = useState(false);
-  // Email whose × dismiss request is in flight (disables just that row).
-  const [removing, setRemoving] = useState("");
+  // Email currently being removed (disables its X while the request settles).
+  const [removing, setRemoving] = useState(null);
 
   const loadList = useCallback(async () => {
     try {
@@ -74,19 +74,20 @@ export default function AdminDashboard() {
     }
   };
 
+  // Admin removes a CR from the authoritative list (backend DELETE /admin/cr).
   const handleRemove = async (addr) => {
-    if (removing) return; // one dismiss in flight at a time
+    if (removing) return; // one removal at a time — avoids list races
     setRemoving(addr);
     setActionError(null);
     setNotice(null);
     try {
       const data = await api.removeCR(addr);
-      setNotice(data.message || `Removed ${addr} from the CR list.`);
+      setNotice(data.message || "CR removed successfully.");
       await loadList();
     } catch (err) {
-      setActionError(err.message || `Could not remove ${addr}.`);
+      setActionError(err.message || "Could not remove that CR email.");
     } finally {
-      setRemoving("");
+      setRemoving(null);
     }
   };
 
@@ -111,6 +112,17 @@ export default function AdminDashboard() {
               Sign out
             </button>
           </div>
+        </div>
+
+        {/* Admins inherit every CR capability, so offer a direct entry. */}
+        <div className="admin-role-nav">
+          <button
+            type="button"
+            className="btn btn-primary btn-small"
+            onClick={() => navigate("/cr")}
+          >
+            Open CR Dashboard
+          </button>
         </div>
 
         <section className="admin-section">
@@ -145,17 +157,17 @@ export default function AdminDashboard() {
           ) : (
             <ul className="admin-cr-list">
               {emails.map((addr) => (
-                <li key={addr}>
+                <li key={addr} className="admin-cr-item">
                   <span className="admin-cr-email">{addr}</span>
                   <button
                     type="button"
-                    className="cr-remove-btn"
+                    className="admin-cr-remove"
                     onClick={() => handleRemove(addr)}
-                    disabled={removing === addr}
-                    aria-label={`Remove ${addr} from the CR list`}
-                    title="Dismiss this CR"
+                    disabled={removing === addr || (removing !== null)}
+                    title="Remove this CR"
+                    aria-label={`Remove ${addr}`}
                   >
-                    {removing === addr ? "…" : "×"}
+                    {removing === addr ? "…" : "✕"}
                   </button>
                 </li>
               ))}

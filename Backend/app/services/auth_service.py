@@ -4,7 +4,9 @@ Roles are decided HERE (never by the frontend):
 - `admins` collection email      -> "admin"   (manages the CR list)
 - `admin_list` collection email  -> "cr"      (runs attendance sessions)
 - everyone else                  -> "student"
-Being an admin does NOT make you a CR — the lists are independent.
+An "admin" role string is used for both, and require_cr() explicitly lets
+admins through, so an admin has every CR capability WITHOUT needing to also
+appear in `admin_list`. Admins are still rejected from student-only actions.
 """
 import logging
 import re
@@ -34,7 +36,7 @@ def is_valid_email(email: str) -> bool:
 
 
 def verify_firebase_id_token(id_token: str) -> dict:
-    """Verify a Firebase ID token and return {uid, email, name}."""
+    """Verify a Firebase ID token and return {uid, email, name, photo}."""
     try:
         decoded = firebase_auth.verify_id_token(id_token)
     except firebase_auth.ExpiredIdTokenError as exc:
@@ -51,6 +53,9 @@ def verify_firebase_id_token(id_token: str) -> dict:
         "uid": decoded.get("uid", ""),
         "email": normalize_email(decoded.get("email", "")),
         "name": decoded.get("name") or "",
+        # Google profile avatar (lh3.googleusercontent.com): a public image URL
+        # the signer's own account exposes, used for the CR present-popup.
+        "photo": str(decoded.get("picture") or "")[:512],
     }
 
 
@@ -90,11 +95,18 @@ def determine_role(email: str) -> str:
     return "student"
 
 
-def upsert_user(uid: str, name: str, email: str, role: str) -> None:
-    """Keep the Firestore `users` document in sync on every authorization."""
+def upsert_user(uid: str, name: str, email: str, role: str,
+                photo_url: str = "") -> None:
+    """Keep the Firestore `users` document in sync on every authorization.
+
+    The Google avatar is only ever written when the signer actually has one;
+    an existing value is kept when a later token carries no picture.
+    """
     db = get_db()
     ref = db.collection(COLLECTION_USERS).document(uid)
     payload = {"uid": uid, "name": name, "email": normalize_email(email), "role": role}
+    if photo_url:
+        payload["photo_url"] = photo_url
     transaction = db.transaction()
 
     @firestore.transactional

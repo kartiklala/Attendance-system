@@ -60,8 +60,7 @@ def get_current_user(request: Request) -> CurrentUser:
 
 
 def require_cr(user: CurrentUser = Depends(get_current_user)) -> CurrentUser:
-    # Admins inherit every CR capability (they can open and control the CR
-    # dashboard). Students are still rejected.
+    """CR endpoints. Admins inherit every CR capability, so both roles pass."""
     if user.role not in ("cr", "admin"):
         raise ForbiddenError("Only a Class Representative can perform this action.",
                              code="CR_ONLY")

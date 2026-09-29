@@ -4,20 +4,50 @@ from pydantic import BaseModel, Field, field_validator
 from app.services.student_service import normalize_last3
 
 
-class VerifyTokenRequest(BaseModel):
-    session_token: str = Field(min_length=8, max_length=128)
+class StartAttemptRequest(BaseModel):
+    """The ONLY input for opening an attendance attempt is the QR token.
 
-    @field_validator("session_token")
+    No name, no enrollment number, no status, no session id: the backend
+    resolves the QR -> session itself (see qr_service.scan_token).
+    """
+    token: str = Field(min_length=8, max_length=128)
+
+    @field_validator("token")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
 
 
-class VerifyTokenResponse(BaseModel):
+class StartAttemptResponse(BaseModel):
+    """Minimum information the student page needs — nothing sensitive."""
     success: bool = True
-    session_id: str
+    attempt_id: str
     window_seconds: int
-    message: str = "Attendance session found."
+    # Server-clock timestamps: the frontend countdown is a display only.
+    expires_at: str
+    remaining_seconds: int
+
+
+class BindAttemptRequest(BaseModel):
+    attempt_id: str = Field(min_length=8, max_length=128)
+
+    @field_validator("attempt_id")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class BindAttemptResponse(BaseModel):
+    """Attempt + saved-identity in one round trip (replaces /student/me).
+
+    `verified` is decided by the backend users/{uid} document — the client
+    never supplies an identity.
+    """
+    success: bool = True
+    verified: bool = False
+    name: str = ""
+    masked_enrollment: str = ""
+    remaining_seconds: int = 0
 
 
 class Last3Request(BaseModel):
@@ -52,12 +82,15 @@ class StudentMeResponse(BaseModel):
 
 class AttendanceCheckRequest(BaseModel):
     """Name/enrollment are NOT accepted here — the backend uses the verified
-    enrollment saved against the student's Firebase UID."""
-    session_token: str = Field(min_length=8, max_length=128)
+    enrollment saved against the student's Firebase UID. The QR token is not
+    accepted either: the individual attendance attempt (created on entry from a
+    live QR) is what authorizes completion, so a QR rotating meanwhile cannot
+    invalidate the student."""
+    attempt_id: str = Field(min_length=8, max_length=128)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
 
-    @field_validator("session_token")
+    @field_validator("attempt_id")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
@@ -73,9 +106,10 @@ class AttendanceCheckResponse(BaseModel):
 class PresentEvent(BaseModel):
     name: str
     marked_at: str
-    # Google profile-picture URL for the arrival popup ("" for records that
-    # predate email capture — the frontend then shows the plain popup).
-    photo: str = ""
+    # Google profile picture for the CR popup ("" -> the UI shows its fallback
+    # avatar). Public avatar URL from the signer's own Google profile; nothing
+    # else about the student (enrollment, IP, device, coordinates) is exposed.
+    photo_url: str = ""
 
 
 class SessionStats(BaseModel):

@@ -21,8 +21,10 @@ function CRRoute() {
     return <Loading label="Checking your access…" />;
   }
   if (!firebaseUser) return <Navigate to="/" replace />;
-  // Admins inherit CR access, so both roles may open the CR dashboard.
-  if (role !== "cr" && role !== "admin") return <ErrorPage message="This area is only available to Class Representatives." />;
+  // Admins inherit every CR capability (require_cr() lets them through
+  // server-side), so both roles may open the CR dashboard.
+  if (role !== "cr" && role !== "admin")
+    return <ErrorPage message="This area is only available to Class Representatives." />;
   return <CRDashboard />;
 }
 
