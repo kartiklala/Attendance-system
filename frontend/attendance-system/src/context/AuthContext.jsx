@@ -143,11 +143,21 @@ export function AuthProvider({ children }) {
       }
       // A completed redirect that yields an account ends the one-time guard.
       clearGoogleRedirectMarker();
+      // Timing the two awaited round trips (Firebase ID token + backend
+      // /authorize-user) is what separates a slow cold Render backend from a
+      // stalled token refresh when users report a long "Authorizing…" pause.
+      const startedAt = Date.now();
       try {
         const token = await user.getIdToken(false);
         await authorize(token);
-        authLog("application session established");
+        authLog("application session established", {
+          durationMs: Date.now() - startedAt,
+        });
       } catch (err) {
+        authLog("authorization failed", {
+          durationMs: Date.now() - startedAt,
+          code: err?.code || "unknown",
+        });
         if (mounted.current) {
           setError(err?.message || "Authorization failed.");
         }
@@ -177,9 +187,20 @@ export function AuthProvider({ children }) {
       // Prefer the settled user: the SDK's own currentUser, then any real user
       // the observer already reported during the pending window, then the
       // redirect result. A null here only happens if genuinely nobody signed in.
-      decide(
-        getCurrentFirebaseUser() || redirectUserRef.current || result?.user || null
-      );
+      //
+      // Logging WHICH source won is the iOS diagnostic: on Safari the redirect
+      // result frequently resolves null while currentUser is already populated,
+      // and only a staging build with VITE_AUTH_DEBUG=true can confirm whether
+      // the platform returns currentUser, getRedirectResult, or neither.
+      const settledUser =
+        getCurrentFirebaseUser() || redirectUserRef.current || result?.user || null;
+      authLog("settling auth state", {
+        fromCurrentUser: Boolean(getCurrentFirebaseUser()),
+        fromObserver: Boolean(redirectUserRef.current),
+        fromRedirectResult: Boolean(result?.user),
+        settledSignedIn: Boolean(settledUser),
+      });
+      decide(settledUser);
     };
     if (returned) {
       redirectPendingRef.current = true;
@@ -254,10 +275,14 @@ export function AuthProvider({ children }) {
   // (navigates away; the bootstrap effect above consumes the return on reload).
   // A blocked desktop popup transparently falls back to redirect inside
   // signInWithGoogle; a popup the user merely closed is reported, not chased.
-  const login = useCallback(async () => {
+  //
+  // `options.selectAccount` is opt-in only: it asks Google for the account
+  // chooser. Leaving it off lets an already-signed-in Google account complete
+  // silently, which is what we want for a routine sign-in.
+  const login = useCallback(async (options = {}) => {
     setError(null);
     try {
-      await signInWithGoogle();
+      await signInWithGoogle(options);
     } catch (err) {
       const cancelled =
         err?.code === "auth/popup-closed-by-user" ||

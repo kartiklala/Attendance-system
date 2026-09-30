@@ -47,6 +47,23 @@ class Settings:
     # immediately invalidates the previous token.
     QR_PERMANENT_LIFETIME_SECONDS: int = 0
 
+    # ---- Shared-browser (proxy) detection ---------------------------------
+    # Pepper for the one-way browser identifier. Deliberately NOT a required new
+    # environment variable: it falls back to JWT_SECRET_KEY so an existing
+    # deployment keeps working unchanged, while allowing a dedicated secret.
+    BROWSER_ID_PEPPER: str = os.getenv("BROWSER_ID_PEPPER", "")
+    # Marks on one browser closer together than this look like one person
+    # working through a list, so the suspicion is raised to "high".
+    PROXY_SHORT_WINDOW_SECONDS: int = _int("PROXY_SHORT_WINDOW_SECONDS", 20)
+    # A Google session younger than this counts as "just signed in", which
+    # supports a shared-browser conclusion (a real class stays signed in for
+    # hours or days). Derived ONLY from the signature-verified Firebase token.
+    PROXY_FRESH_SIGNIN_SECONDS: int = _int("PROXY_FRESH_SIGNIN_SECONDS", 900)
+    # How many trusted proxies sit in front of the app (Render = 1). The client
+    # IP is read this far from the RIGHT of X-Forwarded-For, because the
+    # left-most entry is whatever value the client chose to send.
+    TRUSTED_PROXY_COUNT: int = _int("TRUSTED_PROXY_COUNT", 1)
+
     # CORS / URLs
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "http://localhost:5173")
     PUBLIC_APP_URL: str = os.getenv("PUBLIC_APP_URL", FRONTEND_URL)
@@ -63,6 +80,11 @@ class Settings:
     # read fails fast and the roster cache (stale-on-error) can cover it,
     # instead of hanging on the OS default and surfacing as a 500.
     SHEETS_TIMEOUT_SECONDS: float = _float("SHEETS_TIMEOUT_SECONDS", 20)
+
+    @property
+    def browser_id_secret(self) -> str:
+        """Pepper for browser identifiers: never the raw id, never reversible."""
+        return self.BROWSER_ID_PEPPER or self.JWT_SECRET_KEY
 
     @property
     def is_production(self) -> bool:

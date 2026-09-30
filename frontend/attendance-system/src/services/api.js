@@ -5,6 +5,8 @@
 // third-party HttpOnly cookie — the header is the reliable transport. The
 // cookie is still set by the backend as a same-site/desktop fallback, so all
 // requests keep sending credentials: "include".
+import { getBrowserId } from "./browserId";
+
 const API_BASE = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
 
 // Held only in memory (never localStorage) — refreshed on every /authorize-user.
@@ -188,21 +190,47 @@ export const getSessionStats = (sessionId) =>
 export const getSessionSummary = (sessionId) =>
   request(`/sessions/${sessionId}/summary`);
 
+// CR decision on one shared-browser suspicion: "this pair really was at one
+// phone, I checked". It clears the flag for that student in this session only
+// and returns fresh stats, so the panel updates without waiting for the next
+// poll. It can never block a student and never creates a suspicion.
+export const reviewProxyMark = (sessionId, enrollmentNo, note = "") =>
+  request(
+    `/sessions/${sessionId}/attendance/${encodeURIComponent(enrollmentNo)}/review`,
+    { method: "POST", body: { note } }
+  );
+
 // ---- Student ------------------------------------------------------------
 // Entry gateway: fired the moment /attendance?token=… opens, BEFORE Google
 // sign-in and before any location prompt. Public by design (no JWT), and the
-// QR token is the only thing it sends — no name, enrollment or status.
+// QR token is the only credential it sends — no name, enrollment or status.
 // The backend answers with an opaque attempt id plus its own server-side
 // completion window, so a QR rotating seconds later cannot invalidate the
 // student's attempt.
-export const startAttempt = (token) =>
-  request("/attendance/attempt/start", { method: "POST", body: { token } });
+//
+// `browser_id` rides along because the instant of the scan is the earliest and
+// least gameable moment to record which browser profile is in this attempt: the
+// student has not authenticated yet. It is a random per-profile id, never a
+// device or hardware identifier, and the backend stores only a session-scoped
+// hash of it (see services/browserId.js).
+export const startAttempt = async (token) => {
+  const browser_id = await getBrowserId();
+  return request("/attendance/attempt/start", {
+    method: "POST",
+    body: { token, browser_id },
+  });
+};
 
 // After authentication: the backend binds the attempt to the verified Firebase
 // UID (identity is never claimed by the client) and returns the saved student
 // identity in the same round trip.
-export const bindAttempt = (attemptId) =>
-  request("/attendance/attempt/bind", { method: "POST", body: { attempt_id: attemptId } });
+export const bindAttempt = async (attemptId) => {
+  const browser_id = await getBrowserId();
+  return request("/attendance/attempt/bind", {
+    method: "POST",
+    body: { attempt_id: attemptId, browser_id },
+  });
+};
 
 // Whether this Google account already has a backend-verified enrollment.
 export const getStudentMe = () => request("/student/me");
@@ -217,16 +245,21 @@ export const studentConfirm = (last3) =>
 
 // Identity comes from the verified enrollment saved against the UID, and the
 // completion window from the bound attendance attempt — the request body
-// carries no name, enrollment, QR token or status field at all.
-export const checkAttendance = ({ attemptId, latitude, longitude }) =>
-  request("/attendance/check", {
+// carries no name, enrollment, QR token or status field at all. `browser_id` is
+// the only extra field and it is compared against the id recorded at scan time;
+// it can never block a mark.
+export const checkAttendance = async ({ attemptId, latitude, longitude }) => {
+  const browser_id = await getBrowserId();
+  return request("/attendance/check", {
     method: "POST",
     body: {
       attempt_id: attemptId,
       latitude,
       longitude,
+      browser_id,
     },
   });
+};
 
 // ---- Admin --------------------------------------------------------------
 // Protected FastAPI endpoints. A student/CR calling these is rejected 403 by

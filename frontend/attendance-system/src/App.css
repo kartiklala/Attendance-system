@@ -811,6 +811,133 @@ form input:focus-visible,
   font-weight: 600;
 }
 
+/* ---- Shared-browser review (CR override) -------------------------------- */
+/* Advice, never a block: every rule here exists so a CR can read one suspicion
+   and clear it. No student is stopped by anything in this panel. */
+.proxy-review {
+  margin: 6px auto 8px;
+  max-width: 420px;
+}
+
+.proxy-review-list {
+  padding: 12px 14px;
+  text-align: left;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.proxy-review-title {
+  margin: 0 0 2px;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.proxy-review-hint {
+  margin: 0 0 10px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.proxy-item {
+  margin-bottom: 8px;
+  padding: 10px 12px;
+  background: var(--warning-bg);
+  border: 1px solid #f3dfa6;
+  border-radius: var(--radius-sm);
+}
+
+.proxy-item:last-child {
+  margin-bottom: 0;
+}
+
+/* Same browser + marks seconds apart or fresh Google sign-ins: stronger
+   evidence, so it reads heavier without needing an explanation. */
+.proxy-item-strong {
+  background: var(--danger-bg);
+  border-color: #f0c4bd;
+}
+
+.proxy-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.proxy-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid #f3dfa6;
+  color: var(--warning);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.proxy-chip-strong {
+  border-color: #f0c4bd;
+  color: var(--danger);
+}
+
+.proxy-item-name {
+  font-weight: 600;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+
+.proxy-item-enroll {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78rem;
+  color: var(--navy-600);
+}
+
+.proxy-item-reasons {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.proxy-item-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.proxy-item-meta {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.74rem;
+  color: var(--muted);
+}
+
+/* Clearing is the one action in this panel, so it stays tap-friendly. */
+.proxy-clear-btn {
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+@media (max-width: 480px) {
+  .proxy-review {
+    max-width: none;
+  }
+
+  .proxy-review-list {
+    padding: 12px;
+  }
+
+  .proxy-clear-btn {
+    width: 100%;
+  }
+}
+
 /* ---- Progress ------------------------------------------------------------ */
 .progress-track {
   width: 100%;

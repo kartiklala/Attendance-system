@@ -83,9 +83,15 @@ export function isMobileDevice() {
   return /iPhone|iPad|iPod|Android|Mobile/i.test(ua) || isIpadOS;
 }
 
-function newGoogleProvider() {
+function newGoogleProvider(selectAccount = false) {
   const provider = new GoogleAuthProvider();
-  provider.setCustomParameters({ prompt: "select_account" });
+  // Only ask Google for the account chooser when the user explicitly wants a
+  // different account. Sending prompt=select_account on EVERY sign-in is what
+  // made Google keep showing the picker even when an account was already
+  // available, which read to users as "it asks me to sign in multiple times".
+  if (selectAccount) {
+    provider.setCustomParameters({ prompt: "select_account" });
+  }
   return provider;
 }
 
@@ -121,7 +127,7 @@ function parkAttendanceReturn() {
 
 // signInWithRedirect navigates away and the page reloads on Google's return,
 // so this promise normally never resolves in the calling page.
-async function runGoogleRedirect() {
+async function runGoogleRedirect(selectAccount = false) {
   const attemptPresent = parkAttendanceReturn();
   // Mark BEFORE the call: navigation to Google can begin immediately, so a
   // later page lifetime can never observe an un-marked trip and mistake the
@@ -130,20 +136,24 @@ async function runGoogleRedirect() {
   authLog("sign-in method selected: redirect", {
     pathname: window.location.pathname,
     hasAttempt: attemptPresent,
+    selectAccount,
   });
   authLog("redirect sign-in started");
-  return signInWithRedirect(auth, newGoogleProvider());
+  return signInWithRedirect(auth, newGoogleProvider(selectAccount));
 }
 
 // The single entry point every screen uses (via AuthContext.login).
-export async function signInWithGoogle() {
+// `selectAccount` is opt-in: the default sign-in silently reuses whatever
+// Google session already exists, which is the correct behaviour when the app
+// is only restoring a session the user already has.
+export async function signInWithGoogle({ selectAccount = false } = {}) {
   if (isMobileDevice()) {
-    return runGoogleRedirect();
+    return runGoogleRedirect(selectAccount);
   }
-  authLog("sign-in method selected: popup");
+  authLog("sign-in method selected: popup", { selectAccount });
   authLog("popup sign-in started");
   try {
-    const result = await signInWithPopup(auth, newGoogleProvider());
+    const result = await signInWithPopup(auth, newGoogleProvider(selectAccount));
     authLog("popup sign-in completed");
     return result;
   } catch (err) {
@@ -152,7 +162,7 @@ export async function signInWithGoogle() {
     // request, must be surfaced instead (PART 9).
     if (err?.code === "auth/popup-blocked") {
       authLog("popup blocked; falling back to redirect");
-      return runGoogleRedirect();
+      return runGoogleRedirect(selectAccount);
     }
     throw err;
   }

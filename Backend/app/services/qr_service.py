@@ -29,6 +29,10 @@ from app.core.firebase import (
     COLLECTION_SESSIONS,
     get_db,
 )
+# Imported as a module (not `from ... import name`) so this stays free of the
+# service package's own import order; proxy_detection itself imports nothing
+# from app, so there is no cycle.
+from app.services import proxy_detection
 from app.services.errors import (
     BadRequestError,
     ForbiddenError,
@@ -349,11 +353,16 @@ def _attempts():
     return get_db().collection(COLLECTION_ATTENDANCE_ATTEMPTS)
 
 
-def create_attempt(token_record: dict) -> dict:
+def create_attempt(token_record: dict, browser_id: str = "") -> dict:
     """Open an individual attendance attempt tied to the scanned QR token.
 
     The completion window starts NOW (server time), independent of the short
     QR lifetime and of any subsequent rotation.
+
+    `browser_id` is captured at the instant the QR link is opened — BEFORE the
+    student has authenticated and while they cannot know it is being compared
+    later — and is never overwritten, so it stays a fixed anchor. Only its
+    session-peppered hash is stored, never the raw id.
     """
     now = _utcnow()
     window_seconds = settings.STUDENT_SESSION_MINUTES * 60
@@ -371,6 +380,11 @@ def create_attempt(token_record: dict) -> dict:
         "status": "active",
         "firebase_uid": None,   # bound after authentication
         "bound_at": None,
+        # Scan-time browser identity ("" = this client gave us nothing to anchor).
+        "browser_id_hash": proxy_detection.hash_browser_id(
+            browser_id, token_record["session_id"], settings.browser_id_secret
+        ),
+        "browser_id_changed": False,
     }
     _attempts().document(attempt_id).set(doc)
     logger.info("Attendance attempt created session_id=%s", token_record["session_id"])
@@ -387,7 +401,7 @@ def get_attempt(attempt_id: str) -> dict:
     return data
 
 
-def bind_attempt(attempt_id: str, uid: str) -> dict:
+def bind_attempt(attempt_id: str, uid: str, browser_id: str = "") -> dict:
     """Associate an authenticated Firebase UID with the attempt (server-side).
 
     Runs in a Firestore transaction so first bind wins even if two students
@@ -396,6 +410,10 @@ def bind_attempt(attempt_id: str, uid: str) -> dict:
     can never move to a different UID, and an attempt that is used up or whose
     window has run out is rejected here (immediately, rather than only at
     submission time).
+
+    `browser_id` is compared against the scan-time anchor and a mismatch is
+    RECORDED, never rejected: shared-browser detection warns and the CR decides.
+    The anchor itself is never overwritten — the first browser seen wins.
     """
     db = get_db()
     ref = _attempts().document(attempt_id)
@@ -427,11 +445,26 @@ def bind_attempt(attempt_id: str, uid: str) -> dict:
                 "Please scan the QR code again.",
                 code="ATTENDANCE_ATTEMPT_BOUND",
             )
+        # Hash against the attempt's own session so the value is directly
+        # comparable with the anchor stored at scan time.
+        browser_hash = proxy_detection.hash_browser_id(
+            browser_id, str(data.get("session_id") or ""), settings.browser_id_secret
+        )
+        anchor = str(data.get("browser_id_hash") or "")
+        changed = proxy_detection.browser_id_changed_on_attempt(anchor, browser_hash)
+        update = {"browser_id_changed": bool(changed or data.get("browser_id_changed"))}
+        if not anchor:
+            # No anchor yet (client sent nothing at scan time): adopt this id so
+            # the submission step still has something to compare against.
+            update["browser_id_hash"] = browser_hash
         if not bound_uid:
             now_iso = _iso(_utcnow())
-            transaction.update(ref, {"firebase_uid": uid, "bound_at": now_iso})
+            update["firebase_uid"] = uid
+            update["bound_at"] = now_iso
             data["firebase_uid"] = uid
             data["bound_at"] = now_iso
+        transaction.update(ref, update)
+        data["browser_id_changed"] = update["browser_id_changed"]
         data["_doc_id"] = snapshot.id
         return data
 

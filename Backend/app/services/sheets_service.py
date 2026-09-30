@@ -7,9 +7,12 @@ Worksheets inside the configured spreadsheet:
   (columns: Timestamp | Enrollment No | Student Name | Status | Session-ID)
 - one worksheet PER SESSION (created on session start): a copy of the roster
   with a Status column (ABSENT/red initially, PRESENT/green once the backend
-  records valid attendance) and a Remarks column (blank normally, "Proxy
-  detected" when the same browser + same IP marks two or more students).
+  records valid attendance) and a Remarks column that is REWRITTEN from the
+  session's current shared-browser state on every sync — "Possible shared
+  browser" while a browser served two or more students, blank otherwise (and
+  therefore cleared when a flag is overridden or stops applying).
 """
+import hashlib
 import logging
 import re
 from datetime import datetime, timezone
@@ -35,12 +38,21 @@ def _rgba(red: float, green: float, blue: float) -> dict:
 GREEN = _rgba(0.13, 0.55, 0.13)   # PRESENT background
 RED = _rgba(0.80, 0.12, 0.12)     # ABSENT background
 WHITE = _rgba(1.0, 1.0, 1.0)      # bold text on a coloured background
-AMBER = _rgba(0.98, 0.75, 0.14)   # Remarks background for a proxy flag
+AMBER = _rgba(0.98, 0.75, 0.14)   # Remarks background for a shared-browser flag
 
-# Remark text written next to a student's name when their attendance looks
-# proxied. Triggered ONLY by a shared device_hash (same IP + same browser),
-# never by a shared IP alone — a whole class on one Wi-Fi router is legitimate.
-REMARK_PROXY = "Proxy detected"
+# Prefix of the remark written next to a student whose attendance looks
+# proxied. Written by the whole-column sync below, which derives it from a
+# shared BROWSER id (one profile marking for two or more students). A shared IP
+# alone is never a remark: a whole class on one Wi-Fi router is legitimate, and
+# the address itself was historically client-supplied.
+REMARK_PROXY = "Possible shared browser"
+# How many tabs remember the remarks already written to them. Purely a size
+# guard for this process-local cache.
+_PROXY_STATE_MAX = 25
+# sheet_title -> signature of the remarks currently believed to be on the tab.
+# An optimization only: it lets an unchanged conclusion skip a Sheets write, so
+# a full class does not rewrite the column sixty times. Holds no identity data.
+_proxy_state: dict[str, str] = {}
 
 
 def _get_client() -> gspread.Client:
@@ -132,9 +144,12 @@ def fetch_student_roster() -> list[tuple[str, str]]:
 #
 # One tab per attendance session:
 # "Enrollment ID | Student Name | Status | Remarks". Sheet1 stays the untouched
-# master roster. Remarks is blank normally and gets a "Proxy detected" flag when
-# the same browser + same IP marks two or more students. These calls are
-# best-effort from the session/attendance services — Firestore is the source.
+# master roster. Remarks is blank normally and carries a "Possible shared
+# browser" flag while one browser id marks two or more students — never for a
+# shared IP alone. The flag is recalculated from the session's current records
+# on every sync, so it cannot pile up or outlive the evidence behind it. These
+# calls are best-effort from the session/attendance services — Firestore is the
+# source.
 
 _SESSION_SHEET_PREFIX = "ATT_"
 _UNSAFE_TAB_CHARS = re.compile(r"[^A-Za-z0-9_ -]")
@@ -352,82 +367,94 @@ def mark_student_present(sheet_title: str, enrollment_no: str,
         logger.exception("Could not mark PRESENT on the session sheet title=%s", sheet_title)
 
 
-def _short_time(marked_at: str) -> str:
-    """HH:MM:SS (UTC) from a stored ISO timestamp; '' if it can't be parsed."""
-    if not marked_at:
-        return ""
-    try:
-        return datetime.fromisoformat(marked_at).strftime("%H:%M:%S")
-    except ValueError:
-        return ""
+def sync_proxy_remarks(sheet_title: str, remarks: dict[str, str]) -> None:
+    """Rewrite the WHOLE Remarks column (D) from the session's current state.
 
+    `remarks` maps enrollment_no -> remark text for every student who is
+    suspicious RIGHT NOW. Every other roster row is written blank with its
+    formatting reset, which is what makes an overridden or stale flag visibly
+    disappear. The previous behaviour only ever ADDED a remark and never removed
+    one, so a suspicion from earlier in the session haunted the tab forever and
+    each new flag re-stamped the whole group.
 
-def _proxy_group_label(device_hash: str) -> str:
-    """Short, stable id for one device (the leading hex of its device_hash), so
-    two different proxying devices are labelled distinctly in the sheet."""
-    return f"Device #{(device_hash or '')[:4].upper()}"
-
-
-def _proxy_remark(group_label: str, position: int, total: int,
-                  marked_at: str) -> str:
-    """One student's proxy remark: which device group, their order within it
-    (1 = first to mark), and the time. Example:
-    'Proxy detected · Device #3F9A · #1/2 @ 10:21:05'."""
-    time_text = _short_time(marked_at)
-    suffix = f" @ {time_text}" if time_text else ""
-    return f"{REMARK_PROXY} · {group_label} · #{position}/{total}{suffix}"
-
-
-def flag_proxy_remarks(sheet_title: str, device_hash: str,
-                       arrivals: list[tuple[str, str]]) -> None:
-    """Write an ordered, device-grouped proxy remark into the Remarks column (D)
-    for every student sharing one device_hash (same browser + same IP).
-
-    `arrivals` is (enrollment_no, marked_at) ordered oldest-first, so each row
-    carries its position within the group (who marked first vs second) plus the
-    group's short device id — which keeps two separate proxying devices (e.g.
-    dev1's pair vs dev2's pair) individually identifiable. Called only when the
-    backend confirmed two or more distinct students on that device_hash, so a
-    shared Wi-Fi router (same IP, different browsers) never triggers it.
-    Best-effort: failures are logged, never raised upward."""
-    if not arrivals:
+    One batchUpdate writes the entire column, so the tab is never left half
+    updated, and a conclusion that has not changed skips the API call altogether
+    (`_proxy_state`). Best-effort: failures are logged, never raised into a
+    student's or a CR's request.
+    """
+    if not sheet_title:
         return
-    group_label = _proxy_group_label(device_hash)
-    total = len(arrivals)
     try:
         spreadsheet = _open_spreadsheet()
         sheet = spreadsheet.worksheet(sheet_title)
-        requests = []
-        seen_rows: set[int] = set()
-        for position, (enrollment, marked_at) in enumerate(arrivals, start=1):
-            target = _resolve_row(sheet, sheet_title, enrollment)
-            if target is None or target in seen_rows:
-                continue
-            seen_rows.add(target)
-            requests.append({
-                "updateCells": {
-                    "range": {"sheetId": sheet.id,
-                              "startRowIndex": target - 1, "endRowIndex": target,
-                              "startColumnIndex": 3, "endColumnIndex": 4},
-                    "rows": [{"values": [{
-                        "userEnteredValue": {
-                            "stringValue": _proxy_remark(
-                                group_label, position, total, marked_at),
-                        },
-                        "userEnteredFormat": {
-                            "backgroundColor": AMBER,
-                            "textFormat": {"bold": True},
-                        },
-                    }]}],
-                    "fields": "userEnteredValue,userEnteredFormat",
+
+        rows_of = dict(_session_rows.get(sheet_title) or {})
+        if not rows_of:
+            # Cache miss (e.g. after a restart): locate the roster in column A.
+            # gspread's Worksheet has no formula() method, so a MATCH cannot be
+            # evaluated client-side — read the values and locate them directly.
+            try:
+                column_a = sheet.col_values(1)
+            except (GSpreadException, APIError):
+                logger.exception("Could not read column A title=%s", sheet_title)
+                return
+            for index, value in enumerate(column_a, start=1):
+                key = _norm_enrollment(value)
+                if index > 1 and key and key not in rows_of:
+                    rows_of[key] = index
+        if not rows_of:
+            logger.warning("No roster rows to sync remarks against title=%s",
+                           sheet_title)
+            return
+
+        last_row = max(rows_of.values())
+        # Resolve every remark to a worksheet ROW up front, so an enrollment that
+        # is not on this tab is dropped rather than shifting other rows, and a
+        # column-A scan fallback behaves identically to the seeded cache.
+        flagged: dict[int, str] = {}
+        for enrollment, text in (remarks or {}).items():
+            row = rows_of.get(_norm_enrollment(enrollment))
+            if row and text:
+                flagged[row] = str(text)[:200]
+
+        signature = hashlib.sha1(
+            "|".join(f"{row}={flagged[row]}" for row in sorted(flagged)).encode("utf-8")
+        ).hexdigest()
+        if _proxy_state.get(sheet_title) == signature:
+            return  # the tab already shows exactly this conclusion
+
+        # One cell per roster row, in row order: a flagged row gets its remark
+        # plus amber, every other row an empty value and a RESET format. Writing
+        # the whole column is what makes a cleared flag visibly disappear instead
+        # of lingering, so the tab always reads as the CURRENT conclusion.
+        values = []
+        for row_index in range(2, last_row + 1):
+            text = flagged.get(row_index, "")
+            cell: dict = {"userEnteredValue": {"stringValue": text}}
+            if text:
+                cell["userEnteredFormat"] = {
+                    "backgroundColor": AMBER,
+                    "textFormat": {"bold": True},
                 }
-            })
-        if requests:
-            spreadsheet.batch_update({"requests": requests})
-            logger.info("Proxy remarks written title=%s group=%s rows=%s",
-                        sheet_title, group_label, len(requests))
+            values.append({"values": [cell]})
+
+        spreadsheet.batch_update({"requests": [{
+            "updateCells": {
+                "range": {"sheetId": sheet.id,
+                          "startRowIndex": 1, "endRowIndex": last_row,
+                          "startColumnIndex": 3, "endColumnIndex": 4},
+                "rows": values,
+                # Naming the format field for a BLANK cell is what clears a
+                # stale amber background rather than leaving it behind.
+                "fields": "userEnteredValue,userEnteredFormat",
+            }
+        }]})
+        if len(_proxy_state) >= _PROXY_STATE_MAX:
+            _proxy_state.pop(next(iter(_proxy_state)), None)  # trim oldest tab
+        _proxy_state[sheet_title] = signature
+        logger.info("Proxy remarks synced title=%s flagged=%s rows=%s",
+                    sheet_title, len(flagged), len(values))
     except (gspread.WorksheetNotFound, gspread.SpreadsheetNotFound):
         logger.warning("Session sheet is missing title=%s", sheet_title)
     except (GSpreadException, APIError):
-        logger.exception("Could not write proxy remarks on the session sheet title=%s",
-                         sheet_title)
+        logger.exception("Could not sync proxy remarks title=%s", sheet_title)

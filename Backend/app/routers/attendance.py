@@ -11,6 +11,8 @@ from app.models.attendance import (
     BindAttemptRequest,
     BindAttemptResponse,
     Last3Request,
+    ProxyReviewRequest,
+    ProxyReviewResponse,
     StartAttemptRequest,
     StartAttemptResponse,
     StatsResponse,
@@ -38,6 +40,7 @@ from app.services import (
     session_service,
     student_service,
 )
+from app.utils.http import client_info as _http_client_info
 
 logger = logging.getLogger(__name__)
 
@@ -67,14 +70,24 @@ def _session_info(session: dict) -> SessionInfo:
 
 
 def _client_info(request: Request) -> dict:
-    """SERVER-observed request info for the attendance audit trail. Students
-    never send or control these fields. Behind Render/Firebase proxies the
-    real client IP is in the left-most X-Forwarded-For entry."""
-    forwarded = request.headers.get("x-forwarded-for", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else (
-        request.client.host if request.client else ""
+    """SERVER-observed request info for the attendance audit trail.
+
+    The IP is the address our own proxy appended, never the left-most
+    X-Forwarded-For value the client chose to send (see app/utils/http.py): a
+    student used to be able to dictate their own recorded IP by setting that
+    header. Locally there is no proxy in front of uvicorn, so the header is not
+    trustworthy at all and the socket peer is used instead.
+
+    These fields are audit data only — shared-browser detection is driven by the
+    hashed browser id and never reads them.
+    """
+    return _http_client_info(
+        request.headers,
+        request.client.host if request.client else "",
+        settings.TRUSTED_PROXY_COUNT,
+        # Only a real deployment has a proxy whose appended entry we can trust.
+        trust_forwarded=settings.is_production,
     )
-    return {"ip": ip[:64], "user_agent": request.headers.get("user-agent", "")}
 
 
 # ---- CR: shared session lifecycle ------------------------------------------
@@ -182,8 +195,40 @@ def get_stats(
     session_id: str,
     cr: CurrentUser = Depends(require_cr),
 ) -> StatsResponse:
-    """CR-only: live present/total counts + recent arrivals (jar animation)."""
+    """CR-only: live present/total counts + recent arrivals (jar animation),
+    shared-browser warnings and the per-student review list."""
     return StatsResponse(success=True, stats=attendance_service.get_session_stats(session_id))
+
+
+@router.post(
+    "/sessions/{session_id}/attendance/{enrollment_no}/review",
+    response_model=ProxyReviewResponse,
+)
+def review_attendance(
+    session_id: str,
+    enrollment_no: str,
+    payload: ProxyReviewRequest,
+    cr: CurrentUser = Depends(require_cr),
+) -> ProxyReviewResponse:
+    """CR-only: clear a shared-browser suspicion after reviewing it.
+
+    Detection NEVER blocks a mark, so this is the whole remedy: the CR confirms
+    those students were legitimately at one device (dead battery, shared family
+    phone, lab machine). The decision is recorded on the attendance document with
+    who made it and when, the Sheet's Remarks column is re-synced from the current
+    state (so the flag visibly disappears), and fresh stats come back in the same
+    response. It can only clear — a CR can never manufacture a suspicion.
+    """
+    stats = attendance_service.review_shared_browser_mark(
+        session_id, enrollment_no, cr.uid, payload.note
+    )
+    return ProxyReviewResponse(
+        success=True,
+        enrollment_no=student_service.normalize_enrollment(enrollment_no).upper(),
+        cleared=True,
+        message="Mark cleared for this session.",
+        stats=stats,
+    )
 
 
 @router.get("/sessions/{session_id}", response_model=SessionResponse)
@@ -206,14 +251,18 @@ def start_attempt(payload: StartAttemptRequest) -> StartAttemptResponse:
 
     Deliberately NOT JWT-protected — Google sign-in has not happened yet, and
     the whole point is to start the student's individual completion window the
-    instant the QR link is opened. The QR token is the only accepted input and
-    is validated entirely server-side (exists, session active, still the
+    instant the QR link is opened. The QR token is the only accepted credential
+    and is validated entirely server-side (exists, session active, still the
     displayed/unexpired token). The response carries the opaque attempt id and
-    the server-side window only: no roster, no student/CR/ Firebase identity,
+    the server-side window only: no roster, no student/CR/Firebase identity,
     no session coordinates, and nothing here marks attendance.
+
+    `browser_id` is recorded here, at the moment of the scan, as this attempt's
+    fixed anchor. Only its session-peppered hash is stored (never the id, never
+    blended with the IP or user-agent), and a missing id is simply no anchor.
     """
     record = qr_service.scan_token(payload.token)
-    attempt = qr_service.create_attempt(record)
+    attempt = qr_service.create_attempt(record, browser_id=payload.browser_id)
     return StartAttemptResponse(
         success=True,
         attempt_id=attempt["attempt_id"],
@@ -234,8 +283,13 @@ def bind_attempt(
     never claim an identity. An attempt already bound to a different account is
     rejected (ATTENDANCE_ATTEMPT_BOUND). The saved enrollment is returned with
     it so the returning-student screen needs a single round trip.
+
+    `browser_id` is compared with the scan-time anchor inside the attempt's own
+    transaction; a mismatch is recorded for the CR to review and is never a
+    rejection reason.
     """
-    attempt = qr_service.bind_attempt(payload.attempt_id, student.uid)
+    attempt = qr_service.bind_attempt(payload.attempt_id, student.uid,
+                                      browser_id=payload.browser_id)
     saved = student_service.get_saved_enrollment(student.uid)
     if saved is None:
         return BindAttemptResponse(
@@ -315,7 +369,10 @@ def attendance_check(
     student's own bound attendance attempt (never the QR token). Every other
     check is enforced server-side (see attendance_service.mark_attendance).
     IP and user-agent are captured from the actual HTTP request for the audit
-    trail. The cosmetic per-session Sheet tab flip runs after the response."""
+    trail and are NOT used for detection; `browser_id` (validated + hashed
+    server-side against this session) is. The cosmetic per-session Sheet tab
+    work, including the shared-browser remark sync, runs after the response and
+    can never change or block a successful mark."""
     result = attendance_service.mark_attendance(
         student.uid, payload, client=_client_info(request), background=background
     )

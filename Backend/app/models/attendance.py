@@ -1,21 +1,35 @@
 """Pydantic models for the student attendance flow (last-3 enrollment + check)."""
 from pydantic import BaseModel, Field, field_validator
 
+from app.services.proxy_detection import normalize_browser_id
 from app.services.student_service import normalize_last3
 
 
 class StartAttemptRequest(BaseModel):
-    """The ONLY input for opening an attendance attempt is the QR token.
+    """The ONLY inputs for opening an attendance attempt are the QR token and
+    this browser's random id.
 
     No name, no enrollment number, no status, no session id: the backend
     resolves the QR -> session itself (see qr_service.scan_token).
+
+    `browser_id` is optional on purpose. A client that predates this feature, or
+    one that refused storage, still marks attendance normally: an unknown browser
+    is the absence of evidence, never evidence of anything.
     """
     token: str = Field(min_length=8, max_length=128)
+    browser_id: str = Field(default="", max_length=64)
 
     @field_validator("token")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("browser_id")
+    @classmethod
+    def _id_or_empty(cls, v: str) -> str:
+        # Validation is total and server-side: a malformed id silently becomes
+        # '' rather than a 422, so no client can 500 or poison the pipeline.
+        return normalize_browser_id(v)
 
 
 class StartAttemptResponse(BaseModel):
@@ -30,11 +44,17 @@ class StartAttemptResponse(BaseModel):
 
 class BindAttemptRequest(BaseModel):
     attempt_id: str = Field(min_length=8, max_length=128)
+    browser_id: str = Field(default="", max_length=64)
 
     @field_validator("attempt_id")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("browser_id")
+    @classmethod
+    def _id_or_empty(cls, v: str) -> str:
+        return normalize_browser_id(v)
 
 
 class BindAttemptResponse(BaseModel):
@@ -89,11 +109,17 @@ class AttendanceCheckRequest(BaseModel):
     attempt_id: str = Field(min_length=8, max_length=128)
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
+    browser_id: str = Field(default="", max_length=64)
 
     @field_validator("attempt_id")
     @classmethod
     def _strip(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("browser_id")
+    @classmethod
+    def _id_or_empty(cls, v: str) -> str:
+        return normalize_browser_id(v)
 
 
 class AttendanceCheckResponse(BaseModel):
@@ -124,6 +150,24 @@ class AttendeeEntry(BaseModel):
     marked_at: str
 
 
+class ProxyFlagEntry(BaseModel):
+    """One CURRENT shared-browser suspicion, for the CR to review.
+
+    Recomputed from the session's records on every read, so a stale or
+    overridden flag cannot survive a poll. Carries no IP, no browser id, no
+    hash and no coordinates: the CR needs who and why, nothing to exfiltrate.
+    """
+    enrollment_no: str
+    name: str = ""
+    code: str
+    level: str
+    reasons: list[str] = []
+    group_label: str = ""
+    position: int = 0
+    total: int = 0
+    marked_at: str = ""
+
+
 class SessionStats(BaseModel):
     session_id: str
     session_name: str = ""
@@ -136,13 +180,32 @@ class SessionStats(BaseModel):
     # 'Students Present' panel. Reuses the same poll as `recent` — no extra
     # request. Bounded by class size, so the payload stays small.
     attendees: list[AttendeeEntry] = []
-    # Human-readable proxy-attendance flags ("⚠ Multiple students…").
-    # Raw IP/device data is never exposed here.
+    # Human-readable shared-browser flags ("⚠ Possible shared browser…").
+    # Counts only: never a raw IP, never a browser id, and never a same-IP
+    # warning — one shared network address is a property of the class, not of a
+    # proxy, so it is deliberately not reported anymore.
     warnings: list[str] = []
+    # Per-student suspicions the CR can review or clear. Same single source as
+    # `warnings` and the Sheet remarks column, so the three can never disagree.
+    proxy_review: list[ProxyFlagEntry] = []
 
 
 class StatsResponse(BaseModel):
     success: bool = True
+    stats: SessionStats
+
+
+class ProxyReviewRequest(BaseModel):
+    """CR decision on a suspicion. Only ever clears — never creates a flag."""
+    note: str = Field(default="", max_length=200)
+
+
+class ProxyReviewResponse(BaseModel):
+    success: bool = True
+    enrollment_no: str = ""
+    cleared: bool = True
+    message: str = "Mark cleared for this session."
+    # Fresh stats, so the panel updates without waiting for the next poll.
     stats: SessionStats
 
 

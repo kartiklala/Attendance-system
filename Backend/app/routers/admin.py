@@ -5,7 +5,6 @@ a student or CR crafting this request manually is rejected (ADMIN_ONLY).
 Writes go through this backend only; the React app never touches Firestore.
 """
 import logging
-import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends
@@ -23,7 +22,10 @@ router = APIRouter(tags=["admin"])
 
 MAX_EMAIL_LEN = 254
 # Doc ids are the normalized email; Firestore forbids "/" so we substitute.
-DOC_ID_SAFE_RE = re.compile(r"[/.#\[\]$*]")
+# auth_service performs the same substitution when it looks a role up on every
+# /authorize-user, so both sides MUST share one definition: if they drift, a CR
+# added through this route silently stops resolving as a CR on sign-in.
+DOC_ID_SAFE_RE = auth_service.DOC_ID_SAFE_RE
 
 
 class AddCRRequest(BaseModel):

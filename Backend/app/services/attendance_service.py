@@ -8,29 +8,37 @@ Order of checks performed for every /attendance/check call:
 4. Enrollment still matches the authoritative Google Sheet roster
 5. Distance between CR location and student location <= radius (Haversine)
 6. Duplicate prevention (per student per session, server-side)
-Then: write Firestore attendance document (with server-side audit fields:
-client IP, user-agent, derived device hash) + Google Sheet PRESENT row +
-per-session worksheet status flip, close the attempt, and flag suspicious
-same-IP/device use.
+Then: write the Firestore attendance document (with separate server-observed
+audit fields: client IP, user-agent, session-peppered browser id hash, verified
+auth_time) + Google Sheet PRESENT row + per-session worksheet status flip, close
+the attempt, then RECOMPUTE the session's shared-browser remarks from every
+record and rewrite the Remarks column.
 
 The QR token's own short lifetime is deliberately NOT re-checked here: the QR
 governs ENTRY into the flow, the attempt governs COMPLETION.
 
-Also provides the session statistics (water fill / popups / proxy warnings)
-and the final absentee summary — both computed strictly from server-side data.
+Also provides the session statistics (water fill / popups / shared-browser
+review) and the final absentee summary — both computed strictly from server-side
+data. Detection itself lives in app/services/proxy_detection.py so the rules are
+pure, testable, and shared by the dashboard, the Sheet and the CR override.
 """
 import hashlib
 import logging
 import time
-from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.firebase import COLLECTION_ATTENDANCE, COLLECTION_SESSIONS, get_db
-from app.services import qr_service, session_service, sheets_service, student_service
-from app.services.errors import BadRequestError, ConflictError
+from app.services import (
+    proxy_detection,
+    qr_service,
+    session_service,
+    sheets_service,
+    student_service,
+)
+from app.services.errors import BadRequestError, ConflictError, NotFoundError
 from app.utils.location import haversine_distance_meters
 
 logger = logging.getLogger(__name__)
@@ -43,9 +51,15 @@ def _attendance_doc_id(session_id: str, enrollment_no: str) -> str:
 
 
 def derive_device_hash(client_ip: str, user_agent: str) -> str:
-    """Privacy-conscious server-generated device identifier: a one-way hash
-    of the request's IP + user-agent (never sent to or computed by the
-    browser, never reversed into the raw values by the UI)."""
+    """LEGACY audit value — still written for history, read by NOTHING.
+
+    This was sha256(ip + user-agent), which is not a device identity at all: a
+    class of identical phones on one campus network collapsed into a single
+    hash (innocent students flagged in bulk), while anyone who changed either
+    string escaped completely. Shared-browser detection now uses the per-browser
+    id in proxy_detection and never looks here. The request's IP and user-agent
+    are stored alongside it, unhashed and unblended, for the audit trail.
+    """
     seed = f"{client_ip}|{user_agent}".encode("utf-8", errors="replace")
     return hashlib.sha256(seed).hexdigest()[:16]
 
@@ -73,70 +87,67 @@ def _present_flip_best_effort(sheet_title: str, enrollment_no: str) -> None:
         logger.exception("Could not update the session sheet tab %s", sheet_title)
 
 
-def _same_device_arrivals(session_id: str, device_hash: str) -> list[tuple[str, str]]:
-    """(enrollment_no, marked_at) for every attendance recorded this session on
-    the SAME device_hash, ordered OLDEST-FIRST (the order they actually marked).
+def _session_records(session_id: str) -> list[dict]:
+    """Every attendance record for one session as plain dicts.
 
-    device_hash is sha256(client_ip + user_agent), so a match means the same
-    browser on the same IP — NOT merely the same Wi-Fi router. Equality-only
-    filters need no composite index. Includes the just-written record."""
-    if not device_hash:
-        return []
+    A single equality filter — no orderBy, so no composite index is required.
+    This is the ONLY input the detector reads, which is what lets the Sheet
+    remarks, the dashboard warnings and the CR override agree by construction:
+    they are one calculation over the same rows rather than three separate
+    write-ups that can accumulate and drift.
+    """
     docs = (
         get_db()
         .collection(COLLECTION_ATTENDANCE)
         .where("session_id", "==", session_id)
-        .where("device_hash", "==", device_hash)
         .stream()
     )
-    arrivals: list[tuple[str, str]] = []
-    for doc in docs:
-        data = doc.to_dict() or {}
-        enrollment = data.get("enrollment_no", "")
-        if enrollment:
-            arrivals.append((enrollment, str(data.get("marked_at", ""))))
-    # Oldest-first so the sheet can show who marked first vs later.
-    arrivals.sort(key=lambda item: item[1])
-    return arrivals
+    return [doc.to_dict() or {} for doc in docs]
 
 
-def _proxy_flag_best_effort(sheet_title: str, device_hash: str,
-                            arrivals: list[tuple[str, str]]) -> None:
-    """Cosmetic proxy remark on the session tab: never blocks or fails the
-    student. Best-effort like the PRESENT flip."""
-    try:
-        sheets_service.flag_proxy_remarks(sheet_title, device_hash, arrivals)
-    except Exception:
-        logger.exception("Could not write proxy remarks on the session sheet tab %s",
-                         sheet_title)
+def _detect(records: list[dict]) -> list[proxy_detection.ProxyFlag]:
+    """One detection entry point, so every caller uses the same thresholds."""
+    return proxy_detection.detect(
+        records,
+        short_window_seconds=settings.PROXY_SHORT_WINDOW_SECONDS,
+        fresh_signin_seconds=settings.PROXY_FRESH_SIGNIN_SECONDS,
+    )
 
 
-def _proxy_check_and_flag_best_effort(sheet_title: str, session_id: str,
-                                      device_hash: str) -> None:
-    """After a successful mark, flag EVERY student sharing this device_hash
-    (same browser + same IP) once two or more have used it. Each remark records
-    the device group and the student's order-of-arrival, so two different
-    devices that each proxied (e.g. dev1's pair vs dev2's pair) stay separately
-    identifiable and the first marker is distinguishable from the second. Runs
-    as a background task so the extra read never delays the student's response."""
-    if not sheet_title or not device_hash:
+def sync_remarks_best_effort(sheet_title: str, session_id: str) -> None:
+    """Rewrite the session tab's Remarks column from CURRENT session state.
+
+    Replaces the old append-only behaviour, where a remark written once stayed
+    forever and every later flag re-stamped the whole group. An overridden or
+    no-longer-suspicious student is now visibly cleared. Best-effort: a Sheet
+    failure is logged and never touches the student's or CR's request.
+    """
+    if not sheet_title:
         return
-    arrivals = _same_device_arrivals(session_id, device_hash)
-    if len(arrivals) > 1:
-        _proxy_flag_best_effort(sheet_title, device_hash, arrivals)
+    try:
+        sheets_service.sync_proxy_remarks(
+            sheet_title,
+            proxy_detection.remarks_by_enrollment(_detect(_session_records(session_id))),
+        )
+    except Exception:
+        logger.exception("Could not sync proxy remarks for tab %s", sheet_title)
 
 
 def mark_attendance(student_uid: str, payload, client: dict | None = None,
                    background=None) -> dict:
     """Validate everything and mark the student PRESENT.
 
-    `payload` is an AttendanceCheckRequest (attempt_id + coordinates).
-    `client` carries the SERVER-observed request info {ip, user_agent} —
-    the request body can never supply or override these fields. The
+    `payload` is an AttendanceCheckRequest (attempt_id + coordinates + optional
+    browser_id).
+    `client` carries the SERVER-observed request info {ip, user_agent} — the
+    request body can never supply or override these fields. The
     student's identity is taken from the backend-verified enrollment saved
     against their Firebase UID — never from the request body.
     `background` (optional FastAPI BackgroundTasks) receives the cosmetic
-    Sheet tab flip so the response is not delayed by it.
+    Sheet work so the response is not delayed by it.
+
+    Detection can never block or fail a mark: it only annotates the record and
+    the Sheet for the CR to review.
     """
     started = time.monotonic()
     logger.info("Attendance validation started")
@@ -191,12 +202,25 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
 
     marked_at_iso = datetime.now(timezone.utc).isoformat()
 
-    # Audit fields come from the server-observed request only.
+    # Audit fields come from the server-observed request only, and are stored as
+    # SEPARATE values. Nothing below compares on them.
     client = client or {}
     client_ip = str(client.get("ip") or "")
     user_agent = str(client.get("user_agent") or "")[:512]
-    device_hash = (
-        derive_device_hash(client_ip, user_agent) if client_ip else ""
+
+    # The browser identity, hashed server-side against THIS session with a
+    # server secret. IP and user-agent are deliberately NOT inputs, so a
+    # student who walks off campus Wi-Fi mid-class is still the same browser,
+    # and a class of identical phones on one router is no longer one identity.
+    browser_id = proxy_detection.normalize_browser_id(getattr(payload, "browser_id", ""))
+    browser_id_hash = proxy_detection.hash_browser_id(
+        browser_id, session_id, settings.browser_id_secret
+    )
+    # The attempt's scan-time anchor vs the browser that is submitting now.
+    attempt_anchor = str(attempt.get("browser_id_hash") or "")
+    browser_id_changed = bool(
+        proxy_detection.browser_id_changed_on_attempt(attempt_anchor, browser_id_hash)
+        or attempt.get("browser_id_changed")
     )
 
     # Firestore record first (acts as the idempotency lock).
@@ -212,9 +236,21 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         "distance_meters": round(distance, 2),
         "student_latitude": payload.latitude,
         "student_longitude": payload.longitude,
+        # ---- detection inputs: one field each, never fused together ----
+        # Submitting browser ("" = unknown, which is never evidence).
+        "browser_id_hash": browser_id_hash,
+        # Browser that scanned the QR, for the mid-attempt comparison.
+        "attempt_browser_id_hash": attempt_anchor,
+        "browser_id_changed": browser_id_changed,
+        # Written by the backend from the verified Firebase ID token; a value in
+        # a request body can never reach this field.
+        "auth_time": int(saved.get("auth_time") or 0),
+        # ---- audit trail only: read by no rule ----
         "client_ip": client_ip,
         "user_agent": user_agent,
-        "device_hash": device_hash,
+        "device_hash": (
+            derive_device_hash(client_ip, user_agent) if client_ip else ""
+        ),
         # Google avatar (public profile image) for the CR present-popup.
         "photo_url": str(saved.get("photo_url") or ""),
     })
@@ -244,16 +280,15 @@ def mark_attendance(student_uid: str, payload, client: dict | None = None,
         else:
             _present_flip_best_effort(sheet_title, roster_enrollment)
 
-    # Proxy remarks: flag every student sharing this device_hash (same browser
-    # + same IP) once two or more have marked. A shared IP alone (one Wi-Fi
-    # router, different browsers) never triggers it — device_hash includes the
-    # user-agent too.
-    if sheet_title and device_hash:
+    # Shared-browser detection: recompute the session's remarks from EVERY
+    # record and rewrite the column, so what the CR sees is the current state
+    # rather than a log of everything ever suspected. It can never block or fail
+    # the mark — the student is already PRESENT at this point.
+    if sheet_title:
         if background is not None:
-            background.add_task(_proxy_check_and_flag_best_effort, sheet_title,
-                                session_id, device_hash)
+            background.add_task(sync_remarks_best_effort, sheet_title, session_id)
         else:
-            _proxy_check_and_flag_best_effort(sheet_title, session_id, device_hash)
+            sync_remarks_best_effort(sheet_title, session_id)
 
     logger.info("Attendance successful session_id=%s distance=%.1fm pipeline_ms=%s",
                 session_id, distance, int((time.monotonic() - started) * 1000))
@@ -288,31 +323,10 @@ def _uid_already_marked(session_id: str, student_uid: str) -> bool:
     return any(True for _ in docs)
 
 
-# ---- Live statistics (water fill + present popups + proxy warnings) --------
-
-def _proxy_warnings(entries: list[dict]) -> list[str]:
-    """Flag (never reject) suspicious patterns: several DIFFERENT students
-    marking from the same device hash or the same client IP in one session.
-    Only the count is surfaced to the CR — raw IP/device data stays here."""
-    by_device = defaultdict(set)
-    by_ip = defaultdict(set)
-    for e in entries:
-        uid = e.get("student_uid")
-        if not uid:
-            continue
-        if e.get("device_hash"):
-            by_device[e["device_hash"]].add(uid)
-        if e.get("client_ip"):
-            by_ip[e["client_ip"]].add(uid)
-    warnings: list[str] = []
-    device_shares = sum(1 for uids in by_device.values() if len(uids) > 1)
-    ip_shares = sum(1 for uids in by_ip.values() if len(uids) > 1)
-    if device_shares:
-        warnings.append("\u26a0 Multiple students marked from the same device")
-    if ip_shares:
-        warnings.append("\u26a0 Multiple students detected from the same IP")
-    return warnings
-
+# ---- Live statistics (water fill + present popups + shared-browser review) --
+# Detection policy itself is in app/services/proxy_detection.py. Both the
+# warnings and the per-student review list below come from ONE detect() call over
+# the session's records, so the dashboard can never disagree with the Sheet.
 
 def get_session_stats(session_id: str) -> dict:
     """Present/total counts + most recent arrivals, all server-side data."""
@@ -328,6 +342,11 @@ def get_session_stats(session_id: str) -> dict:
     present_count = len(present_docs)
 
     entries = [doc.to_dict() or {} for doc in present_docs]
+    # One detection pass over the rows already in hand: `warnings` and
+    # `proxy_review` are two views of this single answer (and so is the Sheet,
+    # which is synced from the same function). A cleared or no-longer-suspicious
+    # record simply stops appearing — nothing here accumulates.
+    flags = _detect(entries)
     entries.sort(key=lambda d: str(d.get("marked_at", "")), reverse=True)
     recent = [
         {
@@ -362,8 +381,50 @@ def get_session_stats(session_id: str) -> dict:
         "percentage": percentage,
         "recent": recent,
         "attendees": attendees,
-        "warnings": _proxy_warnings(entries),
+        "warnings": proxy_detection.warnings(flags),
+        "proxy_review": proxy_detection.review_entries(flags),
     }
+
+
+def review_shared_browser_mark(session_id: str, enrollment_no: str,
+                               cr_uid: str, note: str = "") -> dict:
+    """CR clears one shared-browser suspicion after reviewing it.
+
+    Detection never blocks a mark, so this is the entire remedy: the CR confirms
+    the two students were legitimately at one device (dead battery, shared
+    family phone, lab machine). The decision is written on the attendance
+    document with who made it and when, and that record then drops out of the
+    evidence — so clearing one half of a pair leaves one student on that browser,
+    which is not a shared browser, and the remark is removed on the re-sync.
+
+    Returns fresh stats so the dashboard updates without waiting for a poll.
+    """
+    target = student_service.normalize_enrollment(enrollment_no).upper()
+    ref = get_db().collection(COLLECTION_ATTENDANCE).document(
+        _attendance_doc_id(session_id, target)
+    )
+    if not ref.get().exists:
+        raise NotFoundError(
+            "No attendance record found for that student in this session.",
+            code="ATTENDANCE_NOT_FOUND",
+        )
+    ref.set({
+        "review": {
+            "status": proxy_detection.REVIEW_CLEARED,
+            "by_uid": cr_uid,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "note": str(note or "")[:200],
+        }
+    }, merge=True)
+    logger.info("Shared-browser flag cleared by CR session_id=%s", session_id)
+
+    session = get_db().collection(COLLECTION_SESSIONS).document(session_id).get()
+    sheet_title = (session.to_dict() or {}).get("sheet_title") if session.exists else None
+    # Synchronous here: the CR is looking at this tab and expects the remark to
+    # go away when they press the button.
+    if sheet_title:
+        sync_remarks_best_effort(sheet_title, session_id)
+    return get_session_stats(session_id)
 
 
 # ---- Final summary (absentees + present count) -----------------------------

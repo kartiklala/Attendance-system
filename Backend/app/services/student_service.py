@@ -154,10 +154,14 @@ def resolve_last3(last3: str) -> tuple[str, str]:
 # ---- Firebase UID <-> verified enrollment ---------------------------------
 
 def get_saved_enrollment(uid: str) -> dict | None:
-    """Return {name, enrollment_no, photo_url} only when backend-verified.
+    """Return {name, enrollment_no, photo_url, auth_time} when backend-verified.
 
     `photo_url` is the Google avatar captured during authorization; it lets
     the attendance record carry the picture the CR popup shows.
+
+    `auth_time` (epoch seconds, 0 when unknown) was written by the backend from
+    the signature-verified Firebase ID token. Detection reads it from here, so
+    the value never travels through — or is trusted from — the student's client.
     """
     if not uid:
         return None
@@ -170,8 +174,20 @@ def get_saved_enrollment(uid: str) -> dict | None:
             "name": data.get("student_name") or data.get("name") or "",
             "enrollment_no": str(data["enrollment_no"]),
             "photo_url": str(data.get("photo_url") or ""),
+            "auth_time": _as_epoch(data.get("auth_time")),
         }
     return None
+
+
+def _as_epoch(value: object) -> int:
+    """Tolerant epoch read: anything unusable becomes 0 (= unknown, not 0 =
+    signed in at the epoch), so a missing value can never look like evidence."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 def save_verified_enrollment(uid: str, name: str, enrollment_no: str) -> dict:

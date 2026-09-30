@@ -242,9 +242,14 @@ Codes include: `UNAUTHORIZED`, `CR_ONLY`, `STUDENT_ONLY`, `QR_INVALID`,
 
 | Component | Target |
 | --------- | ------ |
-| Frontend  | Firebase Hosting (`npm run build` → deploy `dist/`) |
-| Backend   | Render free web service (`uvicorn app.main:app --host 0.0.0.0 --port $PORT`) |
+| Frontend  | Firebase Hosting — from `frontend/attendance-system/`: `npm run build` → deploy `dist/` |
+| Backend   | Render free web service — from `Backend/`: `uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
 | Database  | Firestore (Spark) · Auth: Firebase Authentication · Attendance: Google Sheets |
+
+> There is no `package.json` at the repository root — every `npm` command must be
+> run from `frontend/attendance-system/`, and every `python`/`uvicorn` command
+> from `Backend/`. Running `npm run build` at the root fails with `ENOENT:
+> no such file or directory, open '.../package.json'`.
 
 Production checklist:
 

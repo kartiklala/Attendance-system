@@ -35,8 +35,11 @@ def authorize_user(request: Request, response: Response) -> AuthorizeResponse:
     """
     identity = auth_service.verify_firebase_id_token(_bearer_token(request))
     role = auth_service.determine_role(identity["email"])
+    # `auth_time` is the only extra argument and it is read-only evidence: the
+    # sign-in decision, the role and the issued JWT are exactly as before.
     auth_service.upsert_user(identity["uid"], identity["name"], identity["email"], role,
-                             photo_url=identity["photo"])
+                             photo_url=identity["photo"],
+                             auth_time=identity.get("auth_time", 0))
 
     token = create_application_jwt(identity["uid"], role, identity["email"])
     apply_auth_cookie(response, token)

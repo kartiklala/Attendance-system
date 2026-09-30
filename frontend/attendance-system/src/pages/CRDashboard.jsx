@@ -1,7 +1,7 @@
 // CR Dashboard: rejoin the single shared active session (or start one with
 // a session NAME) -> live rotating QR (CR-adjustable lifetime, identical for
-// every CR) -> water-fill stats polled from the backend (plus same-device/IP
-// proxy warnings) -> end session -> server-computed summary with the
+// every CR) -> water-fill stats polled from the backend (plus shared-browser
+// review/override) -> end session -> server-computed summary with the
 // absentee list sorted by enrollment, CSV download and clipboard copy.
 // The QR only carries a random short-lived token URL — never JWTs,
 // ID tokens or personal data. All validity decisions are made by FastAPI.
@@ -106,6 +106,10 @@ export default function CRDashboard() {
   const [highlighted, setHighlighted] = useState(() => new Set()); // enrollments
   const knownEnrollRef = useRef(new Set()); // enrollments already listed
   const presentInitRef = useRef(false); // first batch seeded without animating
+  // Shared-browser review panel: which suspicions have a clear-request in flight.
+  // Keyed per student AND reason, because one student can be flagged both for
+  // sharing a browser and for changing it mid-attempt.
+  const [reviewBusy, setReviewBusy] = useState({});
 
   const stopClock = useCallback(() => {
     if (timerRef.current) {
@@ -143,6 +147,7 @@ export default function CRDashboard() {
     presentInitRef.current = false;
     setHighlighted(new Set());
     setShowAllPresent(false);
+    setReviewBusy({});
     setStage("ended");
   }, [stopClock]);
 
@@ -331,6 +336,7 @@ export default function CRDashboard() {
       presentInitRef.current = false;
       setHighlighted(new Set());
       setShowAllPresent(false);
+      setReviewBusy({});
       setSession(data);
       setQrLifetime(isPermanentQr(data.qr) ? QR_LIFETIME_PERMANENT : (data.qr?.expires_in_seconds || REFRESH_SECONDS_FALLBACK));
       setSessionName("");
@@ -443,6 +449,7 @@ export default function CRDashboard() {
       presentInitRef.current = false;
       setHighlighted(new Set());
       setShowAllPresent(false);
+      setReviewBusy({});
       setStage("ended");
     } catch (err) {
       setError(err.message);
@@ -481,16 +488,101 @@ export default function CRDashboard() {
     );
   };
 
-  // Backend-computed proxy-attendance flags (never raw IPs, never student data).
-  const renderWarnings = () => {
+  // CR override for one suspicion. Nothing here can block a student: the flag
+  // is advice, and clearing it is the only available action. The backend drops
+  // that record from the evidence, re-syncs the Sheet and hands back fresh
+  // stats, so the panel updates immediately instead of on the next 15 s poll.
+  const clearProxyFlag = async (item) => {
+    if (!session?.session_id) return;
+    const key = `${item.enrollment_no}-${item.code}`;
+    setReviewBusy((prev) => ({ ...prev, [key]: true }));
+    try {
+      const data = await api.reviewProxyMark(session.session_id, item.enrollment_no);
+      if (data?.stats) setStats(data.stats);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setReviewBusy((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }
+  };
+
+  // Backend-computed shared-browser suspicions (never raw IPs, never browser
+  // ids, never student data beyond name/enrollment, which the CR already has).
+  // Recomputed on every poll, so an overridden or no-longer-suspicious student
+  // simply stops appearing in this list.
+  const renderProxyReview = () => {
     const warnings = stats?.warnings || [];
-    if (warnings.length === 0) return null;
+    const review = stats?.proxy_review || [];
+    if (warnings.length === 0 && review.length === 0) return null;
     return (
-      <div className="session-warnings" role="alert">
-        {warnings.map((w) => (
-          <p key={w}>{w}</p>
-        ))}
-      </div>
+      <section className="proxy-review" aria-live="polite">
+        {warnings.length > 0 && (
+          <div className="session-warnings" role="alert">
+            {warnings.map((w) => (
+              <p key={w}>{w}</p>
+            ))}
+          </div>
+        )}
+        {review.length > 0 && (
+          <div className="proxy-review-list">
+            <h3 className="proxy-review-title">Shared-browser review</h3>
+            <p className="proxy-review-hint">
+              Nobody is blocked or marked absent by these. Ask the student, then
+              clear anything that was legitimate.
+            </p>
+            {review.map((item) => {
+              const key = `${item.enrollment_no}-${item.code}`;
+              const pending = !!reviewBusy[key];
+              const strong = item.level === "high";
+              const meta = [
+                item.group_label,
+                item.total > 1 ? `#${item.position}/${item.total}` : "",
+                formatMarkedTime(item.marked_at),
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              return (
+                <article
+                  className={`proxy-item${strong ? " proxy-item-strong" : ""}`}
+                  key={key}
+                >
+                  <div className="proxy-item-head">
+                    <span
+                      className={`proxy-chip${strong ? " proxy-chip-strong" : ""}`}
+                    >
+                      {strong ? "Strong" : "Possible"}
+                    </span>
+                    <span className="proxy-item-name">
+                      {item.name || item.enrollment_no}
+                    </span>
+                    <span className="proxy-item-enroll">{item.enrollment_no}</span>
+                  </div>
+                  <ul className="proxy-item-reasons">
+                    {(item.reasons || []).map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                  <div className="proxy-item-foot">
+                    <span className="proxy-item-meta">{meta}</span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-small proxy-clear-btn"
+                      onClick={() => clearProxyFlag(item)}
+                      disabled={pending}
+                    >
+                      {pending ? "Clearing…" : "Not a proxy — clear"}
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
     );
   };
 
@@ -941,7 +1033,7 @@ export default function CRDashboard() {
                 </button>
               </div>
               {renderLiveStats()}
-              {renderWarnings()}
+              {renderProxyReview()}
               <p className="session-status">Session Status: Active</p>
               <div className="qr-lifetime-control">
                 <label className="qr-lifetime-label" htmlFor="qr-lifetime-select">
